@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { ArrowLeft, Loader2, UploadCloud } from "lucide-react";
@@ -127,31 +128,28 @@ export default function NewDocument() {
                 />
               </div>
 
-              <FormItem>
-                <FormLabel>Tags (Press Enter to add)</FormLabel>
-                <FormControl>
-                  <div className="space-y-2">
-                    <Input 
-                      placeholder="e.g. policy, billing, technical..." 
-                      value={tagInput}
-                      onChange={e => setTagInput(e.target.value)}
-                      onKeyDown={addTag}
-                    />
-                    {tags.length > 0 && (
-                      <div className="flex flex-wrap gap-2 pt-2">
-                        {tags.map(tag => (
-                          <Badge key={tag} variant="secondary" className="px-2 py-1">
-                            {tag}
-                            <button type="button" onClick={() => removeTag(tag)} className="ml-2 text-muted-foreground hover:text-foreground">
-                              ×
-                            </button>
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
+              <div className="space-y-2">
+                <Label htmlFor="tags-input">Tags (Press Enter to add)</Label>
+                <Input
+                  id="tags-input"
+                  placeholder="e.g. policy, billing, technical..."
+                  value={tagInput}
+                  onChange={e => setTagInput(e.target.value)}
+                  onKeyDown={addTag}
+                />
+                {tags.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-2">
+                    {tags.map(tag => (
+                      <Badge key={tag} variant="secondary" className="px-2 py-1">
+                        {tag}
+                        <button type="button" onClick={() => removeTag(tag)} className="ml-2 text-muted-foreground hover:text-foreground">
+                          ×
+                        </button>
+                      </Badge>
+                    ))}
                   </div>
-                </FormControl>
-              </FormItem>
+                )}
+              </div>
               
               <FormField
                 control={form.control}
