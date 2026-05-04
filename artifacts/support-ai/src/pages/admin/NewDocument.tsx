@@ -10,20 +10,31 @@ import { Textarea } from "@/components/ui/textarea";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { ArrowLeft, Loader2, UploadCloud, FileText, X } from "lucide-react";
+import { ArrowLeft, Loader2, UploadCloud, FileText, X, Scan } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useRef, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
 
-const ACCEPTED_EXTENSIONS = [".txt", ".md", ".csv", ".json"];
-const ACCEPTED_MIME = ["text/plain", "text/markdown", "text/csv", "application/json", "text/x-markdown"];
+const ACCEPTED = ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.tiff,.tif,.txt,.md,.csv,.json";
+
+const FILE_TYPE_LABELS: Record<string, string> = {
+  pdf: "PDF", doc: "Word", docx: "Word", ppt: "PowerPoint", pptx: "PowerPoint",
+  xls: "Excel", xlsx: "Excel", png: "Image", jpg: "Image", jpeg: "Image",
+  webp: "Image", gif: "Image", tiff: "Image", tif: "Image",
+  txt: "Text", md: "Markdown", csv: "CSV", json: "JSON",
+};
 
 function inferSourceType(filename: string): "text" | "pdf" | "docx" | "txt" {
-  const ext = filename.split(".").pop()?.toLowerCase();
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "pdf") return "pdf";
   if (ext === "docx" || ext === "doc") return "docx";
   if (ext === "txt") return "txt";
   return "text";
+}
+
+function getFileLabel(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  return FILE_TYPE_LABELS[ext] ?? "File";
 }
 
 const formSchema = z.object({
@@ -43,49 +54,62 @@ export default function NewDocument() {
   const [dragOver, setDragOver] = useState(false);
   const [droppedFile, setDroppedFile] = useState<{ name: string; size: number } | null>(null);
   const [sourceType, setSourceType] = useState<"text" | "pdf" | "docx" | "txt">("text");
+  const [extracting, setExtracting] = useState(false);
+  const [pasteMode, setPasteMode] = useState(false);
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: { name: "", content: "" },
   });
 
-  const readFileAsText = useCallback((file: File) => {
-    const isText = ACCEPTED_MIME.includes(file.type) ||
-      ACCEPTED_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
-    if (!isText) {
-      toast({
-        title: "Unsupported file type",
-        description: "Please drop a .txt, .md, .csv, or .json file, or paste text directly below.",
-        variant: "destructive",
+  const extractFile = useCallback(async (file: File) => {
+    setExtracting(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/documents/extract", {
+        method: "POST",
+        body: formData,
+        credentials: "include",
       });
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      form.setValue("content", text, { shouldValidate: true });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Extraction failed" })) as { error?: string };
+        throw new Error(err.error ?? "Extraction failed");
+      }
+      const { text } = await res.json() as { text: string };
+      if (!text || text.trim().length < 10) throw new Error("No text could be extracted from this file.");
       const baseName = file.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ");
+      form.setValue("content", text, { shouldValidate: true });
       form.setValue("name", baseName, { shouldValidate: true });
       setSourceType(inferSourceType(file.name));
       setDroppedFile({ name: file.name, size: file.size });
-    };
-    reader.readAsText(file);
+    } catch (err) {
+      toast({
+        title: "Could not extract file",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setExtracting(false);
+    }
   }, [form, toast]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files[0];
-    if (file) readFileAsText(file);
-  }, [readFileAsText]);
+    if (file) extractFile(file);
+  }, [extractFile]);
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) readFileAsText(file);
-  }, [readFileAsText]);
+    if (file) extractFile(file);
+    e.target.value = "";
+  }, [extractFile]);
 
   const clearFile = () => {
     setDroppedFile(null);
+    setPasteMode(false);
     form.setValue("content", "");
     form.setValue("name", "");
     setSourceType("text");
@@ -116,6 +140,7 @@ export default function NewDocument() {
     }
   };
 
+  const hasContent = droppedFile || pasteMode;
   const content = form.watch("content");
 
   return (
@@ -131,67 +156,103 @@ export default function NewDocument() {
             <UploadCloud className="h-6 w-6 text-primary" /> Ingest Document
           </CardTitle>
           <CardDescription>
-            Drop a file or paste text. The pipeline will chunk, remove PII, and flag duplicates automatically.
+            Drop any file — PDF, Word, PowerPoint, Excel, image, or plain text. AI extracts the content automatically.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Form {...form}>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
 
-              {/* Drop zone */}
-              {!droppedFile && !content ? (
+              {/* Drop zone — shown when no file loaded */}
+              {!hasContent && (
                 <div
                   ref={dropRef}
                   onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                   onDragLeave={() => setDragOver(false)}
                   onDrop={handleDrop}
-                  className={`relative flex flex-col items-center justify-center gap-3 rounded-sm border-2 border-dashed transition-colors cursor-pointer py-14 px-8 text-center ${dragOver ? "border-primary bg-accent" : "border-border hover:border-primary/50 hover:bg-secondary/40"}`}
-                  onClick={() => document.getElementById("file-input")?.click()}
+                  className={`relative flex flex-col items-center justify-center gap-3 rounded-sm border-2 border-dashed transition-colors cursor-pointer py-14 px-8 text-center ${dragOver ? "border-primary bg-accent" : "border-border hover:border-primary/50 hover:bg-secondary/40"} ${extracting ? "pointer-events-none opacity-60" : ""}`}
+                  onClick={() => !extracting && document.getElementById("file-input")?.click()}
                 >
                   <input
                     id="file-input"
                     type="file"
-                    accept=".txt,.md,.csv,.json"
+                    accept={ACCEPTED}
                     className="hidden"
                     onChange={handleFileInput}
                   />
-                  <div className={`h-12 w-12 rounded-sm flex items-center justify-center ${dragOver ? "bg-primary text-primary-foreground" : "bg-secondary text-primary"}`}>
-                    <UploadCloud className="h-6 w-6" />
-                  </div>
-                  <div>
-                    <p className="font-semibold text-foreground text-sm">Drop your file here</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Supported: .txt, .md, .csv, .json — or click to browse
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-6 pt-2">
-                    <div className="h-px flex-1 bg-border" />
-                    <span className="text-xs text-muted-foreground uppercase tracking-wider">or paste text below</span>
-                    <div className="h-px flex-1 bg-border" />
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-1"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      form.setValue("content", " ");
-                      setDroppedFile({ name: "Pasted text", size: 0 });
-                    }}
-                  >
-                    Paste text instead
-                  </Button>
+
+                  {extracting ? (
+                    <>
+                      <div className="h-12 w-12 rounded-sm bg-primary/10 flex items-center justify-center text-primary">
+                        <Scan className="h-6 w-6 animate-pulse" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-foreground text-sm">Extracting text with AI…</p>
+                        <p className="text-xs text-muted-foreground mt-1">This may take a few seconds for large files</p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className={`h-12 w-12 rounded-sm flex items-center justify-center ${dragOver ? "bg-primary text-primary-foreground" : "bg-secondary text-primary"}`}>
+                        <UploadCloud className="h-6 w-6" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-foreground text-sm">Drop your file here or click to browse</p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          PDF · Word · PowerPoint · Excel · Images · TXT · CSV · JSON · Markdown
+                        </p>
+                      </div>
+
+                      {/* Format badges */}
+                      <div className="flex flex-wrap justify-center gap-1.5 pt-1 max-w-sm">
+                        {["PDF", "DOCX", "PPTX", "XLSX", "PNG/JPG", "TXT"].map(fmt => (
+                          <span key={fmt} className="text-[10px] font-medium uppercase tracking-wide bg-secondary text-muted-foreground px-2 py-0.5 rounded-sm">
+                            {fmt}
+                          </span>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-6 pt-2 w-full max-w-xs">
+                        <div className="h-px flex-1 bg-border" />
+                        <span className="text-xs text-muted-foreground uppercase tracking-wider">or</span>
+                        <div className="h-px flex-1 bg-border" />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPasteMode(true);
+                          setDroppedFile({ name: "Pasted text", size: 0 });
+                        }}
+                      >
+                        Paste text instead
+                      </Button>
+                    </>
+                  )}
                 </div>
-              ) : (
+              )}
+
+              {/* File chip — shown after file loaded */}
+              {hasContent && (
                 <div className="flex items-center gap-3 rounded-sm border border-primary/30 bg-accent px-4 py-3">
                   <div className="h-9 w-9 rounded-sm bg-primary/10 flex items-center justify-center text-primary flex-shrink-0">
                     <FileText className="h-5 w-5" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground truncate">{droppedFile?.name}</p>
-                    {droppedFile?.size ? (
-                      <p className="text-xs text-muted-foreground">{(droppedFile.size / 1024).toFixed(1)} KB · {content.length.toLocaleString()} chars</p>
+                    <p className="text-sm font-medium text-foreground truncate">
+                      {droppedFile?.name}
+                      {droppedFile?.name && droppedFile.name !== "Pasted text" && (
+                        <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide text-primary bg-primary/10 px-1.5 py-0.5 rounded-sm">
+                          {getFileLabel(droppedFile.name)}
+                        </span>
+                      )}
+                    </p>
+                    {droppedFile && droppedFile.size > 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        {(droppedFile.size / 1024).toFixed(1)} KB · {content.length.toLocaleString()} chars extracted
+                      </p>
                     ) : (
                       <p className="text-xs text-muted-foreground">{content.trim().length.toLocaleString()} chars</p>
                     )}
@@ -202,8 +263,8 @@ export default function NewDocument() {
                 </div>
               )}
 
-              {/* Document name — shown once file is loaded */}
-              {(droppedFile || content) && (
+              {/* Document name */}
+              {hasContent && (
                 <FormField
                   control={form.control}
                   name="name"
@@ -219,8 +280,8 @@ export default function NewDocument() {
                 />
               )}
 
-              {/* Inline textarea for paste-text mode */}
-              {droppedFile?.name === "Pasted text" && (
+              {/* Textarea — only for paste mode */}
+              {pasteMode && (
                 <FormField
                   control={form.control}
                   name="content"
@@ -240,10 +301,13 @@ export default function NewDocument() {
                 />
               )}
 
-              {/* Tags — shown once file is loaded */}
-              {(droppedFile || content) && (
+              {/* Tags */}
+              {hasContent && (
                 <div className="space-y-2">
-                  <Label htmlFor="tags-input">Tags <span className="text-muted-foreground font-normal">(optional — press Enter to add)</span></Label>
+                  <Label htmlFor="tags-input">
+                    Tags{" "}
+                    <span className="text-muted-foreground font-normal">(optional — press Enter to add)</span>
+                  </Label>
                   <Input
                     id="tags-input"
                     placeholder="e.g. policy, billing, technical..."
@@ -256,9 +320,7 @@ export default function NewDocument() {
                       {tags.map(tag => (
                         <Badge key={tag} variant="secondary" className="px-2 py-1">
                           {tag}
-                          <button type="button" onClick={() => removeTag(tag)} className="ml-2 text-muted-foreground hover:text-foreground">
-                            ×
-                          </button>
+                          <button type="button" onClick={() => removeTag(tag)} className="ml-2 text-muted-foreground hover:text-foreground">×</button>
                         </Badge>
                       ))}
                     </div>
@@ -270,7 +332,7 @@ export default function NewDocument() {
                 <Button variant="outline" type="button" onClick={() => setLocation("/admin/documents")}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={createDocument.isPending || (!droppedFile && !content)}>
+                <Button type="submit" disabled={createDocument.isPending || extracting || !hasContent}>
                   {createDocument.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Process & Ingest
                 </Button>
