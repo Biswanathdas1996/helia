@@ -1,0 +1,293 @@
+
+Build a modern, enterprise-grade, highly scalable and low-latency AI-powered Customer Query Resolution Platform using best-in-class architecture, cloud-native design, and production-ready standards.
+
+---
+
+## 🧱 CORE ARCHITECTURE
+
+* Frontend: React.js + TypeScript (Next.js preferred)
+* Backend: Python (FastAPI) OR Node.js (NestJS)
+* Database:
+
+  * MongoDB Atlas (Primary DB + Vector Search)
+* Vector DB: MongoDB Atlas Vector Search
+* Search:
+
+  * Hybrid Retrieval (BM25 + Semantic Search)
+* AI/LLM:
+
+  * Azure OpenAI / OpenAI APIs
+* Infra:
+
+  * Dockerized microservices
+  * Kubernetes-ready
+  * CI/CD enabled (GitHub Actions)
+* Observability:
+
+  * Logging (ELK / OpenTelemetry)
+  * Metrics (Prometheus + Grafana)
+* Auth:
+
+  * JWT + Role-based access control (RBAC)
+
+---
+
+## 👤 ROLES
+
+### 1. Admin
+
+### 2. User
+
+---
+
+## 🔐 ADMIN MODULE
+
+### Authentication
+
+* Secure login with JWT
+* Role-based access
+
+### Dashboard
+
+* Upload stats
+* Document processing stats
+* Query performance metrics
+* PII removal metrics
+* Duplicate content stats
+
+---
+
+## 📄 DOCUMENT INGESTION PIPELINE (CRITICAL)
+
+Build a robust ingestion pipeline with the following stages:
+
+### Step 1: Document Upload
+
+* Support PDF, DOCX, TXT
+* Extract raw text
+
+### Step 2: PII Detection & Removal
+
+* Detect sensitive data (email, phone, SSN, etc.)
+* Mask/remove PII using NLP models
+* Generate PII removal report
+
+### Step 3: Cross-Document Deduplication
+
+* Perform semantic similarity check across knowledge base
+* Use embedding similarity threshold (e.g., cosine similarity)
+* Remove duplicate or near-duplicate content
+* Track removed segments
+
+### Step 4: Admin Review Workflow
+
+* Show:
+
+  * Original content
+  * Removed PII sections
+  * Removed duplicate sections
+* Require admin approval before ingestion
+* Allow rejection with feedback
+
+### Step 5: Chunking Strategy
+
+* Intelligent chunking:
+
+  * Token-based chunking (500–800 tokens)
+  * Overlap strategy (10–20%)
+* Maintain semantic boundaries
+
+### Step 6: Embedding Generation
+
+* Generate embeddings for each chunk
+* Store in MongoDB Atlas Vector DB
+
+### Step 7: Metadata Storage
+
+Store metadata:
+
+* Document name
+* Upload date
+* Document type
+* Keywords
+* Key phrases
+* Tags
+* Chunk IDs
+* Source references
+
+### Step 8: Ingestion Report
+
+Generate detailed report:
+
+* Total PII removed
+* Duplicate content removed
+* Final document size
+* Number of chunks created
+* Embedding stats
+
+---
+
+## 👥 USER MANAGEMENT
+
+* Admin can create multiple users
+* Assign roles
+* Manage credentials securely
+
+---
+
+## 👨‍💻 USER MODULE
+
+### Authentication
+
+* Secure login
+
+### Dashboard
+
+* Previous queries
+* Feedback history
+* Ticket status
+
+---
+
+## 💬 QUERY INTERFACE (AI CORE)
+
+### Chat Interface
+
+* Conversational UI
+* Context-aware responses
+* Streaming responses
+
+---
+
+## 🧠 RETRIEVAL PIPELINE (AGENTIC HYBRID RAG)
+
+Implement a multi-stage intelligent retrieval pipeline:
+
+### Step 1: Query Processing
+
+* Query rewriting
+* Intent detection
+
+### Step 2: Hybrid Search
+
+* BM25 keyword search
+* Semantic vector search
+
+### Step 3: Chunk Deduplication
+
+* Remove redundant chunks
+
+### Step 4: Re-ranking
+
+* Cross-encoder or LLM-based reranking
+
+### Step 5: Context Assembly
+
+* Select top relevant chunks
+
+### Step 6: Answer Generation
+
+* Grounded LLM response
+* Cite sources
+
+### Step 7: Summarization
+
+* Generate concise, accurate answer
+
+---
+
+## 🎫 ESCALATION (TICKET CREATION)
+
+If AI cannot answer:
+
+* Show “Raise Ticket” button
+* Open form:
+
+  * Issue
+  * Description
+  * Priority
+
+### Integration
+
+* Create ticket in Zoho Desk API
+* Store ticket ID
+* Track status
+
+---
+
+## 🔔 PROACTIVE TICKET STATUS
+
+When user opens chat:
+
+* Check for open tickets
+* Show summary:
+
+  * Ticket ID
+  * Current status
+  * Last update
+
+---
+
+## 👍 FEEDBACK LOOP
+
+* User can rate responses
+* Store feedback
+* Use for:
+
+  * Reranking improvements
+  * Fine-tuning datasets
+
+---
+
+## ⚡ PERFORMANCE OPTIMIZATION
+
+* Caching (Redis)
+* Async processing (Celery / BullMQ)
+* Streaming APIs
+* Connection pooling
+
+---
+
+## 🔒 SECURITY
+
+* PII compliance
+* Data encryption (at rest + in transit)
+* Audit logs
+* Rate limiting
+
+---
+
+## 📊 SCALABILITY
+
+* Horizontal scaling
+* Stateless services
+* Load balancing
+* Multi-tenant ready
+
+---
+
+## 🧪 TESTING
+
+* Unit tests
+* Integration tests
+* Load testing
+* AI evaluation benchmarks
+
+---
+
+## 📦 OUTPUT EXPECTATION
+
+Generate:
+
+1. Full project structure
+2. Backend APIs
+3. Frontend UI
+4. Database schema
+5. Deployment configs (Docker + K8s)
+6. Sample environment variables
+7. README with setup instructions
+
+---
+
+Ensure production-grade code quality, modular design, and clean architecture.
+

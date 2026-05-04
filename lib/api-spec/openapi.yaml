@@ -3,20 +3,32 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: AI Customer Query Resolution Platform
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: me
+    description: Current user
+  - name: admin
+    description: Admin operations
+  - name: documents
+    description: Knowledge base documents
+  - name: chat
+    description: Conversational query interface
+  - name: tickets
+    description: Support tickets
+  - name: feedback
+    description: User feedback
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +36,345 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /me:
+    get:
+      operationId: getMe
+      tags: [me]
+      summary: Get the current authenticated user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+
+  /admin/stats:
+    get:
+      operationId: getAdminStats
+      tags: [admin]
+      summary: Aggregate platform statistics
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminStats"
+
+  /admin/stats/trend:
+    get:
+      operationId: getAdminTrend
+      tags: [admin]
+      summary: Daily activity trend (last 14 days)
+      responses:
+        "200":
+          description: Trend
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TrendPoint"
+
+  /admin/activity:
+    get:
+      operationId: getAdminActivity
+      tags: [admin]
+      summary: Recent platform activity
+      responses:
+        "200":
+          description: Activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityItem"
+
+  /documents:
+    get:
+      operationId: listDocuments
+      tags: [documents]
+      summary: List all documents
+      responses:
+        "200":
+          description: Documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Document"
+    post:
+      operationId: createDocument
+      tags: [documents]
+      summary: Upload a new document (text content)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDocumentInput"
+      responses:
+        "201":
+          description: Created with ingestion report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+
+  /documents/{id}:
+    get:
+      operationId: getDocument
+      tags: [documents]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentDetail"
+    delete:
+      operationId: deleteDocument
+      tags: [documents]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /documents/{id}/approve:
+    post:
+      operationId: approveDocument
+      tags: [documents]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+
+  /documents/{id}/reject:
+    post:
+      operationId: rejectDocument
+      tags: [documents]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectInput"
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+
+  /chat/conversations:
+    get:
+      operationId: listConversations
+      tags: [chat]
+      responses:
+        "200":
+          description: Conversations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Conversation"
+    post:
+      operationId: createConversation
+      tags: [chat]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConversationInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+
+  /chat/conversations/{id}:
+    get:
+      operationId: getConversation
+      tags: [chat]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Conversation with messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationDetail"
+    delete:
+      operationId: deleteConversation
+      tags: [chat]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /chat/conversations/{id}/messages:
+    post:
+      operationId: sendMessage
+      tags: [chat]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageInput"
+      responses:
+        "200":
+          description: Assistant reply
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageReply"
+
+  /messages/{id}/feedback:
+    post:
+      operationId: rateMessage
+      tags: [feedback]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RateMessageInput"
+      responses:
+        "200":
+          description: Feedback saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+
+  /tickets:
+    get:
+      operationId: listTickets
+      tags: [tickets]
+      responses:
+        "200":
+          description: Tickets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Ticket"
+    post:
+      operationId: createTicket
+      tags: [tickets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTicketInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+
+  /tickets/{id}:
+    get:
+      operationId: getTicket
+      tags: [tickets]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Ticket
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+    patch:
+      operationId: updateTicket
+      tags: [tickets]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTicketInput"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +382,382 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    Me:
+      type: object
+      properties:
+        userId:
+          type: string
+        email:
+          type: ["string", "null"]
+        firstName:
+          type: ["string", "null"]
+        lastName:
+          type: ["string", "null"]
+        imageUrl:
+          type: ["string", "null"]
+        role:
+          type: string
+          enum: [admin, user]
+      required: [userId, role]
+
+    AdminStats:
+      type: object
+      properties:
+        totalDocuments:
+          type: integer
+        approvedDocuments:
+          type: integer
+        pendingDocuments:
+          type: integer
+        totalChunks:
+          type: integer
+        totalQueries:
+          type: integer
+        totalTickets:
+          type: integer
+        openTickets:
+          type: integer
+        piiRemovedTotal:
+          type: integer
+        duplicateChunksRemoved:
+          type: integer
+        avgLatencyMs:
+          type: integer
+        helpfulRate:
+          type: number
+      required:
+        - totalDocuments
+        - approvedDocuments
+        - pendingDocuments
+        - totalChunks
+        - totalQueries
+        - totalTickets
+        - openTickets
+        - piiRemovedTotal
+        - duplicateChunksRemoved
+        - avgLatencyMs
+        - helpfulRate
+
+    TrendPoint:
+      type: object
+      properties:
+        date:
+          type: string
+        queries:
+          type: integer
+        documents:
+          type: integer
+      required: [date, queries, documents]
+
+    ActivityItem:
+      type: object
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [document_uploaded, document_approved, query_answered, ticket_opened]
+        title:
+          type: string
+        subtitle:
+          type: ["string", "null"]
+        actor:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+      required: [id, kind, title, createdAt]
+
+    PiiFinding:
+      type: object
+      properties:
+        type:
+          type: string
+        value:
+          type: string
+        replacement:
+          type: string
+      required: [type, value, replacement]
+
+    DuplicateFinding:
+      type: object
+      properties:
+        snippet:
+          type: string
+        similarity:
+          type: number
+        matchedDocumentId:
+          type: ["integer", "null"]
+        matchedDocumentName:
+          type: ["string", "null"]
+      required: [snippet, similarity]
+
+    Document:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        sourceType:
+          type: string
+          enum: [text, pdf, docx, txt]
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        originalSize:
+          type: integer
+        finalSize:
+          type: integer
+        piiCount:
+          type: integer
+        duplicateCount:
+          type: integer
+        chunkCount:
+          type: integer
+        tags:
+          type: array
+          items:
+            type: string
+        keywords:
+          type: array
+          items:
+            type: string
+        createdBy:
+          type: ["string", "null"]
+        rejectionReason:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+      required:
+        - id
+        - name
+        - sourceType
+        - status
+        - originalSize
+        - finalSize
+        - piiCount
+        - duplicateCount
+        - chunkCount
+        - tags
+        - keywords
+        - createdAt
+        - updatedAt
+
+    DocumentDetail:
+      allOf:
+        - $ref: "#/components/schemas/Document"
+        - type: object
+          properties:
+            originalText:
+              type: string
+            cleanedText:
+              type: string
+            piiFindings:
+              type: array
+              items:
+                $ref: "#/components/schemas/PiiFinding"
+            duplicateFindings:
+              type: array
+              items:
+                $ref: "#/components/schemas/DuplicateFinding"
+          required:
+            - originalText
+            - cleanedText
+            - piiFindings
+            - duplicateFindings
+
+    CreateDocumentInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        sourceType:
+          type: string
+          enum: [text, pdf, docx, txt]
+        content:
+          type: string
+          minLength: 1
+        tags:
+          type: array
+          items:
+            type: string
+      required: [name, sourceType, content]
+
+    RejectInput:
+      type: object
+      properties:
+        reason:
+          type: string
+      required: []
+
+    Conversation:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        lastMessagePreview:
+          type: ["string", "null"]
+        messageCount:
+          type: integer
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+      required: [id, title, messageCount, createdAt, updatedAt]
+
+    Citation:
+      type: object
+      properties:
+        chunkId:
+          type: integer
+        documentId:
+          type: integer
+        documentName:
+          type: string
+        snippet:
+          type: string
+        score:
+          type: number
+      required: [chunkId, documentId, documentName, snippet, score]
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: integer
+        conversationId:
+          type: integer
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+        latencyMs:
+          type: ["integer", "null"]
+        rating:
+          type: ["string", "null"]
+          enum: [up, down, null]
+        canAnswer:
+          type: ["boolean", "null"]
+        createdAt:
+          type: string
+      required: [id, conversationId, role, content, citations, createdAt]
+
+    ConversationDetail:
+      type: object
+      properties:
+        conversation:
+          $ref: "#/components/schemas/Conversation"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+      required: [conversation, messages]
+
+    CreateConversationInput:
+      type: object
+      properties:
+        title:
+          type: string
+      required: []
+
+    SendMessageInput:
+      type: object
+      properties:
+        content:
+          type: string
+          minLength: 1
+      required: [content]
+
+    MessageReply:
+      type: object
+      properties:
+        userMessage:
+          $ref: "#/components/schemas/Message"
+        assistantMessage:
+          $ref: "#/components/schemas/Message"
+      required: [userMessage, assistantMessage]
+
+    RateMessageInput:
+      type: object
+      properties:
+        rating:
+          type: string
+          enum: [up, down]
+        comment:
+          type: string
+      required: [rating]
+
+    Ticket:
+      type: object
+      properties:
+        id:
+          type: integer
+        subject:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+          enum: [low, medium, high, urgent]
+        status:
+          type: string
+          enum: [open, in_progress, resolved, closed]
+        externalId:
+          type: ["string", "null"]
+        createdBy:
+          type: string
+        relatedMessageId:
+          type: ["integer", "null"]
+        lastUpdate:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+      required:
+        - id
+        - subject
+        - description
+        - priority
+        - status
+        - createdBy
+        - createdAt
+        - updatedAt
+
+    CreateTicketInput:
+      type: object
+      properties:
+        subject:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          minLength: 1
+        priority:
+          type: string
+          enum: [low, medium, high, urgent]
+        relatedMessageId:
+          type: integer
+      required: [subject, description, priority]
+
+    UpdateTicketInput:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [open, in_progress, resolved, closed]
+        lastUpdate:
+          type: string
+      required: []
