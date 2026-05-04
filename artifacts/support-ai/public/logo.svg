@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40">
+  <g>
+    <rect x="0" y="2" width="8" height="8" fill="#FFB600"/>
+    <rect x="9" y="2" width="8" height="8" fill="#EB8C00"/>
+    <rect x="18" y="2" width="8" height="8" fill="#D04A02"/>
+    <rect x="27" y="2" width="8" height="8" fill="#E0301E"/>
+  </g>
+  <text x="0" y="32" font-family="Helvetica Neue, Arial, sans-serif" font-size="20" font-weight="900" fill="#2D2D2D" letter-spacing="-0.5">pwc</text>
+  <text x="48" y="32" font-family="Helvetica Neue, Arial, sans-serif" font-size="18" font-weight="500" fill="#2D2D2D" letter-spacing="-0.3">Helia</text>
+</svg>

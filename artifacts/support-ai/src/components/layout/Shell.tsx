@@ -4,6 +4,7 @@ import { Link, useLocation } from "wouter";
 import { LayoutDashboard, MessageSquare, Ticket as TicketIcon, LogOut, Loader2 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { PwcWordmark } from "@/components/layout/PwcWordmark";
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const { user } = useUser();
@@ -24,8 +25,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen overflow-hidden bg-background">
       {/* Sidebar */}
       <div className="w-64 flex-shrink-0 flex flex-col bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
-        <div className="h-14 flex items-center px-4 font-bold text-xl tracking-tight border-b border-sidebar-border">
-          <span className="text-primary mr-1">■</span> Helia
+        <div className="h-1 pwc-accent-bar" />
+        <div className="h-14 flex items-center px-4 border-b border-sidebar-border">
+          <PwcWordmark variant="dark" product="Helia" size="md" />
         </div>
         
         <div className="flex-1 overflow-y-auto py-4">

@@ -1,16 +1,14 @@
 import { Link } from "wouter";
-import { Button } from "@/components/ui/button";
 import { ArrowRight, Bot, ShieldCheck, Zap } from "lucide-react";
+import { PwcWordmark } from "@/components/layout/PwcWordmark";
 
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-background flex flex-col">
-      <header className="border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50">
+      <div className="h-1 pwc-accent-bar" />
+      <header className="border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="h-6 w-6 bg-primary rounded-sm" />
-            <span className="text-xl font-bold tracking-tight text-foreground">Helia</span>
-          </div>
+          <PwcWordmark product="Helia" size="md" />
           <div className="flex items-center gap-4">
             <Link href="/sign-in" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
               Sign In
@@ -26,16 +24,17 @@ export default function LandingPage() {
         <section className="relative py-24 sm:py-32 flex-1 flex flex-col justify-center items-center text-center px-4 overflow-hidden">
           <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-primary/10 via-background to-background" />
           
-          <div className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80 mb-8">
-            Introducing Helia Support AI
+          <div className="inline-flex items-center gap-2 rounded-none border-l-2 border-primary bg-secondary px-3 py-1 text-xs font-semibold uppercase tracking-wider text-foreground mb-8">
+            <span className="h-1.5 w-1.5 bg-primary" />
+            A PwC Customer Experience Solution
           </div>
           
-          <h1 className="text-5xl md:text-7xl font-extrabold tracking-tighter text-foreground max-w-4xl mx-auto leading-tight">
+          <h1 className="text-5xl md:text-7xl font-black tracking-tight text-foreground max-w-4xl mx-auto leading-[1.05]">
             Intelligent resolution for <span className="text-primary">complex queries.</span>
           </h1>
           
           <p className="mt-6 text-xl text-muted-foreground max-w-2xl mx-auto">
-            Helia turns your internal documentation into a highly precise, context-aware support assistant. Deliver instant answers with verifiable citations.
+            Helia turns your internal documentation into a highly precise, context-aware support assistant. Built on PwC's trust-by-design principles, every answer is backed by verifiable citations.
           </p>
           
           <div className="mt-10 flex flex-col sm:flex-row items-center gap-4">
@@ -78,8 +77,12 @@ export default function LandingPage() {
         </section>
       </main>
 
-      <footer className="py-8 border-t border-border/40 text-center text-sm text-muted-foreground">
-        <p>© {new Date().getFullYear()} Helia. All rights reserved.</p>
+      <footer className="border-t border-border bg-secondary/40">
+        <div className="h-1 pwc-accent-bar" />
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <PwcWordmark product="Helia" size="sm" />
+          <p className="text-xs text-muted-foreground">© {new Date().getFullYear()} PricewaterhouseCoopers. All rights reserved. PwC refers to the PwC network and/or one or more of its member firms.</p>
+        </div>
       </footer>
     </div>
   );
