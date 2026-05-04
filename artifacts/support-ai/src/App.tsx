@@ -24,21 +24,18 @@ import AdminNewDocument from "@/pages/admin/NewDocument";
 import AdminTickets from "@/pages/admin/Tickets";
 
 // Setup
-const clerkPubKey = publishableKeyFromHost(
-  window.location.hostname,
-  import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
-);
+const configuredClerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+const clerkPubKey = configuredClerkPubKey
+  ? publishableKeyFromHost(window.location.hostname, configuredClerkPubKey)
+  : null;
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+const isClerkEnabled = Boolean(clerkPubKey);
 
 function stripBase(path: string): string {
   return basePath && path.startsWith(basePath)
     ? path.slice(basePath.length) || "/"
     : path;
-}
-
-if (!clerkPubKey) {
-  throw new Error("Missing VITE_CLERK_PUBLISHABLE_KEY in .env file");
 }
 
 const clerkAppearance = {
@@ -184,6 +181,25 @@ function ClerkQueryClientCacheInvalidator() {
 
 const queryClient = new QueryClient();
 
+function LocalStartupFallback() {
+  return (
+    <div className="min-h-[100dvh] bg-background">
+      <div className="border-b border-border bg-amber-50 px-4 py-3 text-sm text-amber-950">
+        Local startup mode is running without Clerk configuration. Set
+        {" "}
+        <code className="font-mono">VITE_CLERK_PUBLISHABLE_KEY</code>
+        {" "}
+        to enable sign-in flows, and set
+        {" "}
+        <code className="font-mono">MONGODB_URI</code>
+        {" "}
+        for data-backed API features.
+      </div>
+      <LandingPage />
+    </div>
+  );
+}
+
 function ClerkProviderWithRoutes() {
   const [, setLocation] = useLocation();
 
@@ -218,7 +234,7 @@ function App() {
   return (
     <TooltipProvider>
       <WouterRouter base={basePath}>
-        <ClerkProviderWithRoutes />
+        {isClerkEnabled ? <ClerkProviderWithRoutes /> : <LocalStartupFallback />}
       </WouterRouter>
       <Toaster />
     </TooltipProvider>

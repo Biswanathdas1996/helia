@@ -1,15 +1,20 @@
 import { MongoClient, type Db } from "mongodb";
 
-if (!process.env.MONGODB_URI) {
-  throw new Error("MONGODB_URI must be set. Did you forget to provision MongoDB?");
-}
-
-export const mongoClient = new MongoClient(process.env.MONGODB_URI);
+let mongoClient: MongoClient | null = null;
 
 let dbInstance: Db | null = null;
 let initPromise: Promise<Db> | null = null;
 
 async function init(): Promise<Db> {
+  const mongoUri = process.env.MONGODB_URI;
+  if (!mongoUri) {
+    throw new Error("MONGODB_URI must be set. Did you forget to provision MongoDB?");
+  }
+
+  if (!mongoClient) {
+    mongoClient = new MongoClient(mongoUri);
+  }
+
   await mongoClient.connect();
   const db = mongoClient.db();
   // Indexes (idempotent).
@@ -47,4 +52,5 @@ export async function nextId(name: string): Promise<number> {
   return r!.seq;
 }
 
+export { mongoClient };
 export * from "./schema";
