@@ -1,84 +1,110 @@
 import { Router, type IRouter } from "express";
-import { sql, eq, desc } from "drizzle-orm";
 import {
-  db,
-  documentsTable,
-  chunksTable,
-  messagesTable,
-  ticketsTable,
+  getDb,
+  type DocumentDoc,
+  type ChunkDoc,
+  type MessageDoc,
+  type TicketDoc,
 } from "@workspace/db";
 import { requireAuth, requireAdmin } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
 router.get("/admin/stats", requireAuth, requireAdmin, async (_req, res) => {
-  const [docCounts] = await db
-    .select({
-      total: sql<number>`count(*)::int`,
-      approved: sql<number>`sum(case when ${documentsTable.status} = 'approved' then 1 else 0 end)::int`,
-      pending: sql<number>`sum(case when ${documentsTable.status} = 'pending' then 1 else 0 end)::int`,
-      pii: sql<number>`coalesce(sum(${documentsTable.piiCount}), 0)::int`,
-      dupes: sql<number>`coalesce(sum(${documentsTable.duplicateCount}), 0)::int`,
-    })
-    .from(documentsTable);
-  const [chunkCount] = await db.select({ c: sql<number>`count(*)::int` }).from(chunksTable);
-  const [queryStats] = await db
-    .select({
-      total: sql<number>`sum(case when ${messagesTable.role} = 'assistant' then 1 else 0 end)::int`,
-      avgLatency: sql<number>`coalesce(avg(${messagesTable.latencyMs}), 0)::int`,
-      up: sql<number>`sum(case when ${messagesTable.rating} = 'up' then 1 else 0 end)::int`,
-      rated: sql<number>`sum(case when ${messagesTable.rating} is not null then 1 else 0 end)::int`,
-    })
-    .from(messagesTable);
-  const [ticketStats] = await db
-    .select({
-      total: sql<number>`count(*)::int`,
-      open: sql<number>`sum(case when ${ticketsTable.status} in ('open','in_progress') then 1 else 0 end)::int`,
-    })
-    .from(ticketsTable);
+  const db = await getDb();
+  const docs = db.collection<DocumentDoc>("documents");
+  const chunks = db.collection<ChunkDoc>("chunks");
+  const msgs = db.collection<MessageDoc>("messages");
+  const tickets = db.collection<TicketDoc>("tickets");
+
+  const [docAgg] = await docs
+    .aggregate<{
+      total: number;
+      approved: number;
+      pending: number;
+      pii: number;
+      dupes: number;
+    }>([
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          approved: { $sum: { $cond: [{ $eq: ["$status", "approved"] }, 1, 0] } },
+          pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+          pii: { $sum: "$piiCount" },
+          dupes: { $sum: "$duplicateCount" },
+        },
+      },
+    ])
+    .toArray();
+
+  const totalChunks = await chunks.countDocuments({});
+
+  const [msgAgg] = await msgs
+    .aggregate<{ total: number; avgLatency: number; up: number; rated: number }>([
+      { $match: { role: "assistant" } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          avgLatency: { $avg: { $ifNull: ["$latencyMs", 0] } },
+          up: { $sum: { $cond: [{ $eq: ["$rating", "up"] }, 1, 0] } },
+          rated: { $sum: { $cond: [{ $ifNull: ["$rating", false] }, 1, 0] } },
+        },
+      },
+    ])
+    .toArray();
+
+  const totalTickets = await tickets.countDocuments({});
+  const openTickets = await tickets.countDocuments({ status: { $in: ["open", "in_progress"] } });
 
   res.json({
-    totalDocuments: docCounts?.total ?? 0,
-    approvedDocuments: docCounts?.approved ?? 0,
-    pendingDocuments: docCounts?.pending ?? 0,
-    totalChunks: chunkCount?.c ?? 0,
-    totalQueries: queryStats?.total ?? 0,
-    totalTickets: ticketStats?.total ?? 0,
-    openTickets: ticketStats?.open ?? 0,
-    piiRemovedTotal: docCounts?.pii ?? 0,
-    duplicateChunksRemoved: docCounts?.dupes ?? 0,
-    avgLatencyMs: queryStats?.avgLatency ?? 0,
-    helpfulRate: queryStats && queryStats.rated > 0 ? Number((queryStats.up / queryStats.rated).toFixed(2)) : 0,
+    totalDocuments: docAgg?.total ?? 0,
+    approvedDocuments: docAgg?.approved ?? 0,
+    pendingDocuments: docAgg?.pending ?? 0,
+    totalChunks,
+    totalQueries: msgAgg?.total ?? 0,
+    totalTickets,
+    openTickets,
+    piiRemovedTotal: docAgg?.pii ?? 0,
+    duplicateChunksRemoved: docAgg?.dupes ?? 0,
+    avgLatencyMs: Math.round(msgAgg?.avgLatency ?? 0),
+    helpfulRate: msgAgg && msgAgg.rated > 0 ? Number((msgAgg.up / msgAgg.rated).toFixed(2)) : 0,
   });
 });
 
 router.get("/admin/stats/trend", requireAuth, requireAdmin, async (_req, res) => {
-  const days = 14;
+  const db = await getDb();
+  const since = new Date();
+  since.setUTCDate(since.getUTCDate() - 13);
+  since.setUTCHours(0, 0, 0, 0);
+
+  const groupByDay = (collection: string, match: Record<string, unknown>) =>
+    db
+      .collection(collection)
+      .aggregate<{ _id: string; n: number }>([
+        { $match: { createdAt: { $gte: since }, ...match } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "UTC" } },
+            n: { $sum: 1 },
+          },
+        },
+      ])
+      .toArray();
+
+  const [queries, docs] = await Promise.all([
+    groupByDay("messages", { role: "assistant" }),
+    groupByDay("documents", {}),
+  ]);
+
+  const qMap = new Map(queries.map((q) => [q._id, q.n]));
+  const dMap = new Map(docs.map((d) => [d._id, d.n]));
+
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
-
-  const queries = await db
-    .select({
-      date: sql<string>`to_char(date_trunc('day', ${messagesTable.createdAt}), 'YYYY-MM-DD')`.as("date"),
-      n: sql<number>`count(*)::int`,
-    })
-    .from(messagesTable)
-    .where(sql`${messagesTable.role} = 'assistant' AND ${messagesTable.createdAt} >= now() - interval '14 days'`)
-    .groupBy(sql`date_trunc('day', ${messagesTable.createdAt})`);
-  const docs = await db
-    .select({
-      date: sql<string>`to_char(date_trunc('day', ${documentsTable.createdAt}), 'YYYY-MM-DD')`.as("date"),
-      n: sql<number>`count(*)::int`,
-    })
-    .from(documentsTable)
-    .where(sql`${documentsTable.createdAt} >= now() - interval '14 days'`)
-    .groupBy(sql`date_trunc('day', ${documentsTable.createdAt})`);
-
-  const qMap = new Map(queries.map((q) => [q.date, q.n]));
-  const dMap = new Map(docs.map((d) => [d.date, d.n]));
-
   const out: { date: string; queries: number; documents: number }[] = [];
-  for (let i = days - 1; i >= 0; i--) {
+  for (let i = 13; i >= 0; i--) {
     const d = new Date(today);
     d.setUTCDate(d.getUTCDate() - i);
     const key = d.toISOString().slice(0, 10);
@@ -88,22 +114,12 @@ router.get("/admin/stats/trend", requireAuth, requireAdmin, async (_req, res) =>
 });
 
 router.get("/admin/activity", requireAuth, requireAdmin, async (_req, res) => {
-  const recentDocs = await db
-    .select()
-    .from(documentsTable)
-    .orderBy(desc(documentsTable.updatedAt))
-    .limit(10);
-  const recentMsgs = await db
-    .select()
-    .from(messagesTable)
-    .where(eq(messagesTable.role, "assistant"))
-    .orderBy(desc(messagesTable.createdAt))
-    .limit(10);
-  const recentTickets = await db
-    .select()
-    .from(ticketsTable)
-    .orderBy(desc(ticketsTable.createdAt))
-    .limit(10);
+  const db = await getDb();
+  const [recentDocs, recentMsgs, recentTickets] = await Promise.all([
+    db.collection<DocumentDoc>("documents").find({}).sort({ updatedAt: -1 }).limit(10).toArray(),
+    db.collection<MessageDoc>("messages").find({ role: "assistant" }).sort({ createdAt: -1 }).limit(10).toArray(),
+    db.collection<TicketDoc>("tickets").find({}).sort({ createdAt: -1 }).limit(10).toArray(),
+  ]);
 
   type Item = {
     id: string;
@@ -116,7 +132,7 @@ router.get("/admin/activity", requireAuth, requireAdmin, async (_req, res) => {
   const items: Item[] = [];
   for (const d of recentDocs) {
     items.push({
-      id: `doc-${d.id}-create`,
+      id: `doc-${d._id}-create`,
       kind: "document_uploaded",
       title: `Uploaded "${d.name}"`,
       subtitle: `${d.chunkCount} chunks · ${d.piiCount} PII removed`,
@@ -125,7 +141,7 @@ router.get("/admin/activity", requireAuth, requireAdmin, async (_req, res) => {
     });
     if (d.status === "approved") {
       items.push({
-        id: `doc-${d.id}-approve`,
+        id: `doc-${d._id}-approve`,
         kind: "document_approved",
         title: `Approved "${d.name}"`,
         subtitle: null,
@@ -136,7 +152,7 @@ router.get("/admin/activity", requireAuth, requireAdmin, async (_req, res) => {
   }
   for (const m of recentMsgs) {
     items.push({
-      id: `msg-${m.id}`,
+      id: `msg-${m._id}`,
       kind: "query_answered",
       title: m.content.slice(0, 80),
       subtitle: `${m.citations.length} sources · ${m.latencyMs ?? 0}ms`,
@@ -146,7 +162,7 @@ router.get("/admin/activity", requireAuth, requireAdmin, async (_req, res) => {
   }
   for (const t of recentTickets) {
     items.push({
-      id: `tkt-${t.id}`,
+      id: `tkt-${t._id}`,
       kind: "ticket_opened",
       title: t.subject,
       subtitle: `${t.priority} priority · ${t.status}`,

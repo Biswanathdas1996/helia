@@ -17,9 +17,9 @@
     "@workspace/integrations-openai-ai-server": "workspace:*",
     "cookie-parser": "^1.4.7",
     "cors": "^2",
-    "drizzle-orm": "catalog:",
     "express": "^5",
     "http-proxy-middleware": "^3.0.3",
+    "mongodb": "^7.2.0",
     "pino": "^9",
     "pino-http": "^10"
   },

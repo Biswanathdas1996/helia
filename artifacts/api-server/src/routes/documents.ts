@@ -1,13 +1,10 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { CreateDocumentBody, RejectDocumentBody } from "@workspace/api-zod";
 import {
-  CreateDocumentBody,
-  RejectDocumentBody,
-} from "@workspace/api-zod";
-import {
-  db,
-  documentsTable,
-  chunksTable,
+  getDb,
+  nextId,
+  type DocumentDoc,
+  type ChunkDoc,
   type DuplicateFinding,
 } from "@workspace/db";
 import { requireAuth, requireAdmin } from "../middlewares/auth";
@@ -16,9 +13,9 @@ import { tokenize, termFrequency, topKeywords, chunkText, jaccard } from "../lib
 
 const router: IRouter = Router();
 
-function serializeDoc(doc: typeof documentsTable.$inferSelect) {
+function serializeDoc(doc: DocumentDoc) {
   return {
-    id: doc.id,
+    id: doc._id,
     name: doc.name,
     sourceType: doc.sourceType,
     status: doc.status,
@@ -36,13 +33,24 @@ function serializeDoc(doc: typeof documentsTable.$inferSelect) {
   };
 }
 
+function parseId(raw: unknown): number | null {
+  const n = Number(Array.isArray(raw) ? raw[0] : raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 router.get("/documents", requireAuth, requireAdmin, async (_req, res) => {
-  const rows = await db.select().from(documentsTable).orderBy(sql`${documentsTable.createdAt} DESC`);
+  const db = await getDb();
+  const rows = await db
+    .collection<DocumentDoc>("documents")
+    .find({})
+    .sort({ createdAt: -1 })
+    .toArray();
   res.json(rows.map(serializeDoc));
 });
 
 router.post("/documents", requireAuth, requireAdmin, async (req: Request, res: Response) => {
   const body = CreateDocumentBody.parse(req.body);
+  const db = await getDb();
   const { cleaned, findings } = detectAndMaskPii(body.content);
   const originalSize = body.content.length;
   const finalSize = cleaned.length;
@@ -50,34 +58,29 @@ router.post("/documents", requireAuth, requireAdmin, async (req: Request, res: R
   const rawChunks = chunkText(cleaned);
   const newSets = rawChunks.map((c) => new Set(tokenize(c)));
 
-  // Cross-document dedup: only compare against approved documents' chunks.
+  // Cross-document dedup against approved documents only.
   const approvedDocs = await db
-    .select({ id: documentsTable.id, name: documentsTable.name })
-    .from(documentsTable)
-    .where(eq(documentsTable.status, "approved"));
-  const docNameById = new Map(approvedDocs.map((d) => [d.id, d.name]));
-  const existing = approvedDocs.length === 0
+    .collection<DocumentDoc>("documents")
+    .find({ status: "approved" }, { projection: { _id: 1, name: 1 } })
+    .toArray();
+  const docNameById = new Map(approvedDocs.map((d) => [d._id, d.name]));
+  const approvedIds = approvedDocs.map((d) => d._id);
+  const existing = approvedIds.length === 0
     ? []
     : await db
-        .select({
-          id: chunksTable.id,
-          content: chunksTable.content,
-          documentId: chunksTable.documentId,
-        })
-        .from(chunksTable)
-        .where(inArray(chunksTable.documentId, approvedDocs.map((d) => d.id)));
+        .collection<ChunkDoc>("chunks")
+        .find({ documentId: { $in: approvedIds } }, { projection: { _id: 1, content: 1, documentId: 1 } })
+        .toArray();
   const existingPrepared = existing.map((c) => ({
-    id: c.id,
+    id: c._id,
     documentId: c.documentId,
     set: new Set(tokenize(c.content)),
-    snippet: c.content.slice(0, 160),
   }));
 
   const duplicateFindings: DuplicateFinding[] = [];
   const keepIdx: number[] = [];
   for (let i = 0; i < rawChunks.length; i++) {
     let isDup = false;
-    // Within-doc dedup
     for (const k of keepIdx) {
       const sim = jaccard(newSets[i], newSets[k]);
       if (sim >= 0.85) {
@@ -92,7 +95,6 @@ router.post("/documents", requireAuth, requireAdmin, async (req: Request, res: R
       }
     }
     if (!isDup) {
-      // Cross-doc dedup
       for (const e of existingPrepared) {
         const sim = jaccard(newSets[i], e.set);
         if (sim >= 0.85) {
@@ -111,52 +113,62 @@ router.post("/documents", requireAuth, requireAdmin, async (req: Request, res: R
   }
 
   const keptChunks = keepIdx.map((i) => rawChunks[i]);
-  const overallTokens = tokenize(cleaned);
-  const overallTf = termFrequency(overallTokens);
+  const overallTf = termFrequency(tokenize(cleaned));
   const keywords = topKeywords(overallTf, 12);
+  const now = new Date();
 
-  const [doc] = await db
-    .insert(documentsTable)
-    .values({
-      name: body.name,
-      sourceType: body.sourceType,
-      status: "pending",
-      originalText: body.content,
-      cleanedText: cleaned,
-      originalSize,
-      finalSize,
-      piiCount: findings.length,
-      duplicateCount: duplicateFindings.length,
-      chunkCount: keptChunks.length,
-      piiFindings: findings,
-      duplicateFindings,
-      tags: body.tags ?? [],
-      keywords,
-      createdBy: req.user?.email ?? req.user?.userId ?? null,
-    })
-    .returning();
+  const docId = await nextId("documents");
+  const doc: DocumentDoc = {
+    _id: docId,
+    name: body.name,
+    sourceType: body.sourceType,
+    status: "pending",
+    originalText: body.content,
+    cleanedText: cleaned,
+    originalSize,
+    finalSize,
+    piiCount: findings.length,
+    duplicateCount: duplicateFindings.length,
+    chunkCount: keptChunks.length,
+    piiFindings: findings,
+    duplicateFindings,
+    tags: body.tags ?? [],
+    keywords,
+    createdBy: req.user?.email ?? req.user?.userId ?? null,
+    rejectionReason: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await db.collection<DocumentDoc>("documents").insertOne(doc);
 
   if (keptChunks.length > 0) {
-    await db.insert(chunksTable).values(
-      keptChunks.map((content, idx) => {
-        const tokens = tokenize(content);
-        return {
-          documentId: doc.id,
-          position: idx,
-          content,
-          tokenCount: tokens.length,
-          termFreq: termFrequency(tokens),
-        };
-      }),
-    );
+    const chunkDocs: ChunkDoc[] = [];
+    for (let idx = 0; idx < keptChunks.length; idx++) {
+      const content = keptChunks[idx];
+      const tokens = tokenize(content);
+      chunkDocs.push({
+        _id: await nextId("chunks"),
+        documentId: docId,
+        position: idx,
+        content,
+        tokenCount: tokens.length,
+        createdAt: now,
+      });
+    }
+    await db.collection<ChunkDoc>("chunks").insertMany(chunkDocs);
   }
 
   res.status(201).json(serializeDoc(doc));
 });
 
 router.get("/documents/:id", requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
-  const [doc] = await db.select().from(documentsTable).where(eq(documentsTable.id, id));
+  const id = parseId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid id", status: 400 });
+    return;
+  }
+  const db = await getDb();
+  const doc = await db.collection<DocumentDoc>("documents").findOne({ _id: id });
   if (!doc) {
     res.status(404).json({ error: "Document not found", status: 404 });
     return;
@@ -171,38 +183,54 @@ router.get("/documents/:id", requireAuth, requireAdmin, async (req, res) => {
 });
 
 router.delete("/documents/:id", requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
-  await db.delete(documentsTable).where(eq(documentsTable.id, id));
+  const id = parseId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid id", status: 400 });
+    return;
+  }
+  const db = await getDb();
+  await db.collection<ChunkDoc>("chunks").deleteMany({ documentId: id });
+  await db.collection<DocumentDoc>("documents").deleteOne({ _id: id });
   res.status(204).send();
 });
 
 router.post("/documents/:id/approve", requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
-  const [doc] = await db
-    .update(documentsTable)
-    .set({ status: "approved", rejectionReason: null })
-    .where(eq(documentsTable.id, id))
-    .returning();
-  if (!doc) {
+  const id = parseId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid id", status: 400 });
+    return;
+  }
+  const db = await getDb();
+  const r = await db.collection<DocumentDoc>("documents").findOneAndUpdate(
+    { _id: id },
+    { $set: { status: "approved", rejectionReason: null, updatedAt: new Date() } },
+    { returnDocument: "after" },
+  );
+  if (!r) {
     res.status(404).json({ error: "Document not found", status: 404 });
     return;
   }
-  res.json(serializeDoc(doc));
+  res.json(serializeDoc(r));
 });
 
 router.post("/documents/:id/reject", requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parseId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid id", status: 400 });
+    return;
+  }
   const body = RejectDocumentBody.parse(req.body ?? {});
-  const [doc] = await db
-    .update(documentsTable)
-    .set({ status: "rejected", rejectionReason: body.reason ?? null })
-    .where(and(eq(documentsTable.id, id)))
-    .returning();
-  if (!doc) {
+  const db = await getDb();
+  const r = await db.collection<DocumentDoc>("documents").findOneAndUpdate(
+    { _id: id },
+    { $set: { status: "rejected", rejectionReason: body.reason ?? null, updatedAt: new Date() } },
+    { returnDocument: "after" },
+  );
+  if (!r) {
     res.status(404).json({ error: "Document not found", status: 404 });
     return;
   }
-  res.json(serializeDoc(doc));
+  res.json(serializeDoc(r));
 });
 
 export default router;

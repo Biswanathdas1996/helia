@@ -1,3 +1,2 @@
-import { db } from "@workspace/db";
-export { db };
 export * from "@workspace/db";
+export { getDb, nextId } from "@workspace/db";

@@ -1,26 +1,27 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { and, eq, sql, inArray } from "drizzle-orm";
+import { CreateConversationBody, SendMessageBody } from "@workspace/api-zod";
 import {
-  CreateConversationBody,
-  SendMessageBody,
-} from "@workspace/api-zod";
-import {
-  db,
-  conversationsTable,
-  messagesTable,
-  documentsTable,
-  chunksTable,
+  getDb,
+  nextId,
+  type ConversationDoc,
+  type MessageDoc,
+  type DocumentDoc,
+  type ChunkDoc,
   type Citation,
 } from "@workspace/db";
 import { requireAuth } from "../middlewares/auth";
-import { bm25 } from "../lib/text";
 import { chat, type ChatTurn } from "../lib/openai";
 
 const router: IRouter = Router();
 
-function serializeConversation(c: typeof conversationsTable.$inferSelect, opts?: { lastPreview?: string | null; messageCount?: number }) {
+function parseId(raw: unknown): number | null {
+  const n = Number(Array.isArray(raw) ? raw[0] : raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function serializeConversation(c: ConversationDoc, opts?: { lastPreview?: string | null; messageCount?: number }) {
   return {
-    id: c.id,
+    id: c._id,
     title: c.title,
     lastMessagePreview: opts?.lastPreview ?? null,
     messageCount: opts?.messageCount ?? 0,
@@ -29,9 +30,9 @@ function serializeConversation(c: typeof conversationsTable.$inferSelect, opts?:
   };
 }
 
-function serializeMessage(m: typeof messagesTable.$inferSelect) {
+function serializeMessage(m: MessageDoc) {
   return {
-    id: m.id,
+    id: m._id,
     conversationId: m.conversationId,
     role: m.role,
     content: m.content,
@@ -44,32 +45,32 @@ function serializeMessage(m: typeof messagesTable.$inferSelect) {
 }
 
 router.get("/chat/conversations", requireAuth, async (req, res) => {
+  const db = await getDb();
   const userId = req.user!.userId;
   const convos = await db
-    .select()
-    .from(conversationsTable)
-    .where(eq(conversationsTable.userId, userId))
-    .orderBy(sql`${conversationsTable.updatedAt} DESC`);
+    .collection<ConversationDoc>("conversations")
+    .find({ userId })
+    .sort({ updatedAt: -1 })
+    .toArray();
 
   const countMap = new Map<number, number>();
   const previews = new Map<number, string>();
   if (convos.length > 0) {
-    const ids = convos.map((c) => c.id);
+    const ids = convos.map((c) => c._id);
     const counts = await db
-      .select({
-        conversationId: messagesTable.conversationId,
-        count: sql<number>`count(*)::int`.as("count"),
-      })
-      .from(messagesTable)
-      .where(inArray(messagesTable.conversationId, ids))
-      .groupBy(messagesTable.conversationId);
-    for (const c of counts) countMap.set(c.conversationId, c.count);
+      .collection<MessageDoc>("messages")
+      .aggregate<{ _id: number; count: number }>([
+        { $match: { conversationId: { $in: ids } } },
+        { $group: { _id: "$conversationId", count: { $sum: 1 } } },
+      ])
+      .toArray();
+    for (const c of counts) countMap.set(c._id, c.count);
 
     const recent = await db
-      .select({ conversationId: messagesTable.conversationId, content: messagesTable.content, createdAt: messagesTable.createdAt })
-      .from(messagesTable)
-      .where(inArray(messagesTable.conversationId, ids))
-      .orderBy(sql`${messagesTable.createdAt} DESC`);
+      .collection<MessageDoc>("messages")
+      .find({ conversationId: { $in: ids } }, { projection: { conversationId: 1, content: 1, createdAt: 1 } })
+      .sort({ createdAt: -1 })
+      .toArray();
     for (const r of recent) {
       if (!previews.has(r.conversationId)) previews.set(r.conversationId, r.content.slice(0, 120));
     }
@@ -78,8 +79,8 @@ router.get("/chat/conversations", requireAuth, async (req, res) => {
   res.json(
     convos.map((c) =>
       serializeConversation(c, {
-        messageCount: countMap.get(c.id) ?? 0,
-        lastPreview: previews.get(c.id) ?? null,
+        messageCount: countMap.get(c._id) ?? 0,
+        lastPreview: previews.get(c._id) ?? null,
       }),
     ),
   );
@@ -87,31 +88,38 @@ router.get("/chat/conversations", requireAuth, async (req, res) => {
 
 router.post("/chat/conversations", requireAuth, async (req, res) => {
   const body = CreateConversationBody.parse(req.body ?? {});
-  const [c] = await db
-    .insert(conversationsTable)
-    .values({
-      userId: req.user!.userId,
-      title: body.title ?? "New conversation",
-    })
-    .returning();
+  const db = await getDb();
+  const now = new Date();
+  const c: ConversationDoc = {
+    _id: await nextId("conversations"),
+    userId: req.user!.userId,
+    title: body.title ?? "New conversation",
+    createdAt: now,
+    updatedAt: now,
+  };
+  await db.collection<ConversationDoc>("conversations").insertOne(c);
   res.status(201).json(serializeConversation(c, { messageCount: 0 }));
 });
 
 router.get("/chat/conversations/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
-  const [c] = await db
-    .select()
-    .from(conversationsTable)
-    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.userId, req.user!.userId)));
+  const id = parseId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid id", status: 400 });
+    return;
+  }
+  const db = await getDb();
+  const c = await db
+    .collection<ConversationDoc>("conversations")
+    .findOne({ _id: id, userId: req.user!.userId });
   if (!c) {
     res.status(404).json({ error: "Conversation not found", status: 404 });
     return;
   }
   const msgs = await db
-    .select()
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, id))
-    .orderBy(messagesTable.createdAt);
+    .collection<MessageDoc>("messages")
+    .find({ conversationId: id })
+    .sort({ createdAt: 1 })
+    .toArray();
   res.json({
     conversation: serializeConversation(c, {
       messageCount: msgs.length,
@@ -122,94 +130,132 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res) => {
 });
 
 router.delete("/chat/conversations/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
-  await db
-    .delete(conversationsTable)
-    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.userId, req.user!.userId)));
+  const id = parseId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid id", status: 400 });
+    return;
+  }
+  const db = await getDb();
+  const r = await db
+    .collection<ConversationDoc>("conversations")
+    .deleteOne({ _id: id, userId: req.user!.userId });
+  if (r.deletedCount === 0) {
+    res.status(404).json({ error: "Conversation not found", status: 404 });
+    return;
+  }
+  await db.collection<MessageDoc>("messages").deleteMany({ conversationId: id });
   res.status(204).send();
 });
 
 router.post("/chat/conversations/:id/messages", requireAuth, async (req: Request, res: Response) => {
-  const id = Number(req.params.id);
+  const id = parseId(req.params.id);
+  if (id === null) {
+    res.status(400).json({ error: "Invalid id", status: 400 });
+    return;
+  }
   const body = SendMessageBody.parse(req.body);
+  const db = await getDb();
 
-  const [c] = await db
-    .select()
-    .from(conversationsTable)
-    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.userId, req.user!.userId)));
+  const c = await db
+    .collection<ConversationDoc>("conversations")
+    .findOne({ _id: id, userId: req.user!.userId });
   if (!c) {
     res.status(404).json({ error: "Conversation not found", status: 404 });
     return;
   }
 
   const started = Date.now();
-  const [userMsg] = await db
-    .insert(messagesTable)
-    .values({ conversationId: id, role: "user", content: body.content })
-    .returning();
+  const userMsg: MessageDoc = {
+    _id: await nextId("messages"),
+    conversationId: id,
+    role: "user",
+    content: body.content,
+    citations: [],
+    canAnswer: null,
+    latencyMs: null,
+    rating: null,
+    feedbackComment: null,
+    createdAt: new Date(),
+  };
+  await db.collection<MessageDoc>("messages").insertOne(userMsg);
 
-  // Auto-title on first user message.
   if (c.title === "New conversation") {
     const title = body.content.slice(0, 60).replace(/\s+/g, " ").trim();
-    await db.update(conversationsTable).set({ title }).where(eq(conversationsTable.id, id));
+    await db.collection<ConversationDoc>("conversations").updateOne(
+      { _id: id },
+      { $set: { title, updatedAt: new Date() } },
+    );
   } else {
-    await db.update(conversationsTable).set({ updatedAt: new Date() }).where(eq(conversationsTable.id, id));
+    await db.collection<ConversationDoc>("conversations").updateOne({ _id: id }, { $set: { updatedAt: new Date() } });
   }
 
-  // Retrieve top chunks via BM25 across approved documents only.
+  // Retrieve top chunks via Mongo $text search across approved docs only.
   const approvedDocs = await db
-    .select({ id: documentsTable.id, name: documentsTable.name })
-    .from(documentsTable)
-    .where(eq(documentsTable.status, "approved"));
-  const docNameById = new Map(approvedDocs.map((d) => [d.id, d.name]));
-  const approvedIds = approvedDocs.map((d) => d.id);
+    .collection<DocumentDoc>("documents")
+    .find({ status: "approved" }, { projection: { _id: 1, name: 1 } })
+    .toArray();
+  const docNameById = new Map(approvedDocs.map((d) => [d._id, d.name]));
+  const approvedIds = approvedDocs.map((d) => d._id);
 
   let citations: Citation[] = [];
   let context = "";
   if (approvedIds.length > 0) {
-    const chunks = await db
-      .select()
-      .from(chunksTable)
-      .where(inArray(chunksTable.documentId, approvedIds));
-    const corpus = chunks.map((ch) => ({
-      id: ch.id,
-      documentId: ch.documentId,
-      tf: ch.termFreq,
-      len: ch.tokenCount,
+    let scored: (ChunkDoc & { score: number })[] = [];
+    try {
+      scored = await db
+        .collection<ChunkDoc>("chunks")
+        .find(
+          { documentId: { $in: approvedIds }, $text: { $search: body.content } },
+          {
+            projection: {
+              _id: 1,
+              documentId: 1,
+              position: 1,
+              content: 1,
+              tokenCount: 1,
+              createdAt: 1,
+              score: { $meta: "textScore" },
+            },
+          },
+        )
+        .sort({ score: { $meta: "textScore" } })
+        .limit(5)
+        .toArray() as (ChunkDoc & { score: number })[];
+    } catch (err) {
+      req.log?.warn({ err }, "$text search failed; falling back to recent chunks");
+    }
+    if (scored.length === 0) {
+      scored = (await db
+        .collection<ChunkDoc>("chunks")
+        .find({ documentId: { $in: approvedIds } })
+        .sort({ _id: -1 })
+        .limit(5)
+        .toArray()).map((c) => ({ ...c, score: 0 }));
+    }
+    citations = scored.map((c) => ({
+      chunkId: c._id,
+      documentId: c.documentId,
+      documentName: docNameById.get(c.documentId) ?? "Untitled",
+      snippet: c.content.slice(0, 280),
+      score: Number((c.score ?? 0).toFixed(3)),
     }));
-    const scored = bm25(body.content, corpus).slice(0, 5);
-    const chunkById = new Map(chunks.map((ch) => [ch.id, ch]));
-    citations = scored.map((s) => {
-      const ch = chunkById.get(s.chunkId)!;
-      return {
-        chunkId: ch.id,
-        documentId: ch.documentId,
-        documentName: docNameById.get(ch.documentId) ?? "Untitled",
-        snippet: ch.content.slice(0, 280),
-        score: Number(s.score.toFixed(3)),
-      };
-    });
     context = scored
-      .map((s, i) => {
-        const ch = chunkById.get(s.chunkId)!;
-        return `[${i + 1}] (${docNameById.get(ch.documentId)}) ${ch.content}`;
-      })
+      .map((c, i) => `[${i + 1}] (${docNameById.get(c.documentId)}) ${c.content}`)
       .join("\n\n");
   }
 
-  // Pull short conversation history for context.
-  const history = await db
-    .select()
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, id))
-    .orderBy(messagesTable.createdAt);
-  const recent = history.slice(-6);
+  const recent = await db
+    .collection<MessageDoc>("messages")
+    .find({ conversationId: id })
+    .sort({ createdAt: 1 })
+    .toArray();
+  const recentSlice = recent.slice(-6);
 
   const sys: ChatTurn = {
     role: "system",
     content: `You are Helia, an AI customer support assistant. Answer the user's question using ONLY the numbered context snippets below.
 - Cite sources inline using [n] notation matching the snippets you used.
-- If the answer cannot be found in the context, set canAnswer to false and explain that the support team can be contacted via a ticket.
+- If the answer cannot be found in the context, set canAnswer to false and suggest opening a support ticket.
 - Keep answers concise, friendly, and accurate.
 
 Respond as JSON with this exact shape:
@@ -221,7 +267,7 @@ ${context || "(no documents indexed yet)"}`,
 
   const turns: ChatTurn[] = [
     sys,
-    ...recent.slice(0, -1).map<ChatTurn>((m) => ({
+    ...recentSlice.slice(0, -1).map<ChatTurn>((m) => ({
       role: m.role === "assistant" ? "assistant" : "user",
       content: m.content,
     })),
@@ -247,17 +293,19 @@ ${context || "(no documents indexed yet)"}`,
     ? usedIdx.map((n) => citations[n - 1]).filter((x): x is Citation => Boolean(x))
     : citations;
 
-  const [assistantMsg] = await db
-    .insert(messagesTable)
-    .values({
-      conversationId: id,
-      role: "assistant",
-      content: answer,
-      citations: filteredCitations,
-      canAnswer,
-      latencyMs: Date.now() - started,
-    })
-    .returning();
+  const assistantMsg: MessageDoc = {
+    _id: await nextId("messages"),
+    conversationId: id,
+    role: "assistant",
+    content: answer,
+    citations: filteredCitations,
+    canAnswer,
+    latencyMs: Date.now() - started,
+    rating: null,
+    feedbackComment: null,
+    createdAt: new Date(),
+  };
+  await db.collection<MessageDoc>("messages").insertOne(assistantMsg);
 
   res.json({
     userMessage: serializeMessage(userMsg),
