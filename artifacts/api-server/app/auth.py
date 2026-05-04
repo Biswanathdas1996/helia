@@ -73,19 +73,13 @@ async def require_auth(request: Request) -> AuthedUser:
         return request.state.user  # type: ignore[no-any-return]
 
     secret = os.environ.get("CLERK_SECRET_KEY")
-    publishable = os.environ.get("CLERK_PUBLISHABLE_KEY") or os.environ.get(
-        "VITE_CLERK_PUBLISHABLE_KEY"
-    )
     if not secret:
         raise HTTPException(status_code=503, detail="Auth not configured")
 
     try:
         state = authenticate_request(
             _to_httpx_request(request),
-            AuthenticateRequestOptions(
-                secret_key=secret,
-                publishable_key=publishable,
-            ),
+            AuthenticateRequestOptions(secret_key=secret),
         )
     except Exception as err:  # pragma: no cover - defensive
         log.exception("authenticate_request failed: %s", err)
