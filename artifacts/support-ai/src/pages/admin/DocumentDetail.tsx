@@ -1,11 +1,12 @@
 import { useLocation, useParams } from "wouter";
-import { useGetDocument, useApproveDocument, useRejectDocument, useDeleteDocument, getListDocumentsQueryKey, getGetDocumentQueryKey } from "@workspace/api-client-react";
+import { useGetDocument, useApproveDocument, useRejectDocument, useDeleteDocument, useExcludeDocumentDuplicateChunk, useListDocuments, getListDocumentsQueryKey, getGetDocumentQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { ArrowLeft, Check, X, Trash2, Search, AlertTriangle, FileText, File, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, X, Trash2, Search, AlertTriangle, FileText, File, Loader2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -22,13 +23,61 @@ export default function AdminDocumentDetail() {
   const { data: doc, isLoading } = useGetDocument(id, {
     query: { enabled: !!id, queryKey: getGetDocumentQueryKey(id) }
   });
+  const { data: allDocs } = useListDocuments({
+    query: { enabled: !!id, queryKey: getListDocumentsQueryKey() }
+  });
 
   const approve = useApproveDocument();
   const reject = useRejectDocument();
   const remove = useDeleteDocument();
+  const excludeDuplicate = useExcludeDocumentDuplicateChunk();
 
   const [rejectReason, setRejectReason] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
+  const [lineageQuery, setLineageQuery] = useState("");
+  const [activeSourcePosition, setActiveSourcePosition] = useState<number | null>(null);
+
+  const rootId = doc?.rootDocumentId ?? doc?.id ?? id;
+  const lineageDocs = !allDocs?.length
+    ? []
+    : allDocs
+        .filter(d => (d.rootDocumentId ?? d.id) === rootId)
+        .sort((a, b) => {
+          const av = a.documentVersion ?? 0;
+          const bv = b.documentVersion ?? 0;
+          if (av !== bv) return bv - av;
+          return b.id - a.id;
+        });
+  const lineageStats = {
+    total: lineageDocs.length,
+    approved: lineageDocs.filter(d => d.status === "approved").length,
+    pending: lineageDocs.filter(d => d.status === "pending").length,
+    totalChunks: lineageDocs.reduce((sum, d) => sum + (d.chunkCount ?? 0), 0),
+  };
+  const lineageOriginId = !lineageDocs.length
+    ? null
+    : [...lineageDocs]
+        .sort((a, b) => {
+          const av = a.documentVersion ?? 0;
+          const bv = b.documentVersion ?? 0;
+          if (av !== bv) return av - bv;
+          return a.id - b.id;
+        })[0]?.id ?? null;
+  const q = lineageQuery.trim().toLowerCase();
+  const filteredLineageDocs = !q
+    ? lineageDocs
+    : lineageDocs.filter(item => {
+        const haystack = [
+          item.name,
+          String(item.id),
+          String(item.documentVersion ?? 0),
+          item.status,
+          item.lastIngestionRunId ?? "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(q);
+      });
 
   if (isLoading) return <div className="p-8 flex justify-center"><Loader2 className="animate-spin h-8 w-8 text-primary" /></div>;
   if (!doc) return <div className="p-8">Document not found</div>;
@@ -67,12 +116,36 @@ export default function AdminDocumentDetail() {
     }
   };
 
+  const handleExcludeDuplicateChunk = async (sourceChunkPosition: number | undefined) => {
+    if (typeof sourceChunkPosition !== "number") {
+      toast({ title: "Missing source chunk position", variant: "destructive" });
+      return;
+    }
+
+    try {
+      setActiveSourcePosition(sourceChunkPosition);
+      await excludeDuplicate.mutateAsync({ id, sourcePosition: sourceChunkPosition });
+      queryClient.invalidateQueries({ queryKey: getGetDocumentQueryKey(id) });
+      queryClient.invalidateQueries({ queryKey: getListDocumentsQueryKey() });
+      toast({ title: doc.status === "pending" ? "Duplicate chunk excluded" : "Duplicate chunk removed" });
+    } catch {
+      toast({ title: "Failed to update duplicate chunk", variant: "destructive" });
+    } finally {
+      setActiveSourcePosition(null);
+    }
+  };
+
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  const formatConfidence = (confidence?: number) => {
+    if (typeof confidence !== "number") return null;
+    return `${Math.round(confidence * 100)}% confidence`;
   };
 
   const isPending = doc.status === "pending";
@@ -97,6 +170,11 @@ export default function AdminDocumentDetail() {
           </div>
           <p className="text-sm text-muted-foreground">
             Uploaded {format(new Date(doc.createdAt), 'PPP')} • Source: {doc.sourceType.toUpperCase()}
+          </p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Version {doc.documentVersion ?? 0}
+            {doc.rootDocumentId ? ` • Root #${doc.rootDocumentId}` : ""}
+            {doc.lastIngestionRunId ? ` • Run ${doc.lastIngestionRunId}` : ""}
           </p>
         </div>
 
@@ -176,6 +254,86 @@ export default function AdminDocumentDetail() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Lineage Trace</CardTitle>
+          <CardDescription>
+            Documents connected by root lineage #{rootId}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <p className="text-xs uppercase text-muted-foreground tracking-wider">Family Docs</p>
+              <p className="text-xl font-semibold">{lineageStats.total}</p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-muted-foreground tracking-wider">Approved</p>
+              <p className="text-xl font-semibold text-green-600">{lineageStats.approved}</p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-muted-foreground tracking-wider">Pending</p>
+              <p className="text-xl font-semibold text-amber-600">{lineageStats.pending}</p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-muted-foreground tracking-wider">Indexed Chunks</p>
+              <p className="text-xl font-semibold font-mono">{lineageStats.totalChunks}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <Input
+              value={lineageQuery}
+              onChange={e => setLineageQuery(e.target.value)}
+              placeholder="Filter by name, id, version, status, run id"
+              className="max-w-md"
+            />
+            <p className="text-xs text-muted-foreground">
+              Showing {filteredLineageDocs.length} of {lineageDocs.length}
+            </p>
+          </div>
+
+          {filteredLineageDocs.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No related lineage documents found.</p>
+          ) : (
+            <div className="space-y-2">
+              {filteredLineageDocs.map(item => {
+                const current = item.id === doc.id;
+                const isRoot = item.id === rootId;
+                const isOrigin = lineageOriginId !== null && item.id === lineageOriginId;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => !current && setLocation(`/admin/documents/${item.id}`)}
+                    className={`w-full rounded-lg border px-3 py-2 text-left transition ${current ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}
+                    disabled={current}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{item.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          Doc #{item.id} • v{item.documentVersion ?? 0}
+                          {item.lastIngestionRunId ? ` • ${item.lastIngestionRunId}` : ""}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {current && <Badge variant="secondary">Current</Badge>}
+                        {isRoot && <Badge variant="outline">Root</Badge>}
+                        {isOrigin && <Badge variant="outline">Origin</Badge>}
+                        <Badge variant={item.status === 'approved' ? 'default' : item.status === 'rejected' ? 'destructive' : 'secondary'} className="capitalize">
+                          {item.status}
+                        </Badge>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <Tabs defaultValue="findings" className="w-full">
         <TabsList className="mb-4">
           <TabsTrigger value="findings">Review Findings</TabsTrigger>
@@ -199,9 +357,17 @@ export default function AdminDocumentDetail() {
                     {doc.piiFindings.map((finding, i) => (
                       <div key={i} className="text-sm border-b pb-3 last:border-0 last:pb-0">
                         <div className="flex justify-between items-center mb-1">
-                          <Badge variant="outline" className="text-[10px] bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/20 dark:text-purple-400">{finding.type}</Badge>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline" className="text-[10px] bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/20 dark:text-purple-400">{finding.type}</Badge>
+                            {finding.detector && (
+                              <Badge variant="secondary" className="text-[10px] font-normal">{finding.detector}</Badge>
+                            )}
+                          </div>
                           <span className="text-muted-foreground">→ replaced with <code className="bg-muted px-1 rounded">{finding.replacement}</code></span>
                         </div>
+                        {formatConfidence(finding.confidence) && (
+                          <p className="text-[11px] text-muted-foreground">{formatConfidence(finding.confidence)}</p>
+                        )}
                         <p className="font-mono text-xs bg-muted p-2 rounded mt-2">{finding.value}</p>
                       </div>
                     ))}
@@ -213,23 +379,60 @@ export default function AdminDocumentDetail() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base flex items-center gap-2 text-orange-700 dark:text-orange-400">
-                  <File className="h-4 w-4" /> Duplicate Chunks ({doc.duplicateFindings.length})
+                  <File className="h-4 w-4" /> {doc.status === "pending" ? "Potential Duplicate Content" : "Duplicate Chunks"} ({doc.duplicateFindings.length})
                 </CardTitle>
+                <CardDescription>
+                  {doc.status === "pending"
+                    ? "Potential duplicates are auto-removed on approval; you can manually exclude them now."
+                    : "Manually remove duplicate chunks when needed."}
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 {doc.duplicateFindings.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No duplicate content detected.</p>
+                  <p className="text-sm text-muted-foreground">
+                    {doc.status === "pending"
+                      ? "No overlap detected above preview threshold."
+                      : "No duplicate content detected."}
+                  </p>
                 ) : (
                   <div className="space-y-4">
                     {doc.duplicateFindings.map((finding, i) => (
                       <div key={i} className="text-sm border-b pb-4 last:border-0 last:pb-0">
                         <div className="flex justify-between items-center mb-2">
-                          <span className="font-medium text-xs bg-orange-100 text-orange-800 px-2 py-0.5 rounded dark:bg-orange-900/30 dark:text-orange-400">
-                            {Math.round(finding.similarity * 100)}% match
-                          </span>
-                          <span className="text-muted-foreground text-xs">with Document #{finding.matchedDocumentId}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-xs bg-orange-100 text-orange-800 px-2 py-0.5 rounded dark:bg-orange-900/30 dark:text-orange-400">
+                              {Math.round(finding.similarity * 100)}% match
+                            </span>
+                            {finding.method && (
+                              <Badge variant="secondary" className="text-[10px] font-normal">{finding.method}</Badge>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-muted-foreground text-xs">
+                              {typeof finding.matchedDocumentId === "number"
+                                ? `with Document #${finding.matchedDocumentId}`
+                                : "within this document"}
+                            </span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2 text-xs"
+                              disabled={
+                                excludeDuplicate.isPending ||
+                                activeSourcePosition === finding.sourceChunkPosition ||
+                                typeof finding.sourceChunkPosition !== "number"
+                              }
+                              onClick={() => handleExcludeDuplicateChunk(finding.sourceChunkPosition)}
+                            >
+                              {excludeDuplicate.isPending && activeSourcePosition === finding.sourceChunkPosition
+                                ? "Removing..."
+                                : doc.status === "pending"
+                                  ? "Exclude Chunk"
+                                  : "Delete Chunk"}
+                            </Button>
+                          </div>
                         </div>
-                        <p className="italic text-muted-foreground leading-relaxed line-clamp-3 bg-muted p-2 rounded">"{finding.snippet}"</p>
+                        <p className="italic text-muted-foreground leading-relaxed bg-muted p-2 rounded whitespace-pre-wrap break-words">"{finding.snippet}"</p>
                       </div>
                     ))}
                   </div>
@@ -262,6 +465,3 @@ export default function AdminDocumentDetail() {
     </div>
   );
 }
-
-// Needed import for CheckCircle2
-import { CheckCircle2 } from "lucide-react";

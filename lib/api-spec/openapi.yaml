@@ -173,6 +173,47 @@ paths:
               schema:
                 $ref: "#/components/schemas/Document"
 
+  /documents/{id}/chunks/{chunkId}:
+    delete:
+      operationId: deleteDocumentChunk
+      tags: [documents]
+      summary: Delete a specific indexed chunk from a document
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+        - in: path
+          name: chunkId
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /documents/{id}/duplicates/{sourcePosition}:
+    delete:
+      operationId: excludeDocumentDuplicateChunk
+      tags: [documents]
+      summary: Manually exclude a duplicate chunk by source position
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+        - in: path
+          name: sourcePosition
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "204":
+          description: Excluded
+
   /documents/{id}/reject:
     post:
       operationId: rejectDocument
@@ -478,6 +519,10 @@ components:
           type: string
         replacement:
           type: string
+        detector:
+          type: string
+        confidence:
+          type: number
       required: [type, value, replacement]
 
     DuplicateFinding:
@@ -487,10 +532,17 @@ components:
           type: string
         similarity:
           type: number
+        method:
+          type: string
         matchedDocumentId:
           type: ["integer", "null"]
         matchedDocumentName:
           type: ["string", "null"]
+        matchedChunkId:
+          type: ["integer", "null"]
+        sourceChunkPosition:
+          type: integer
+          minimum: 0
       required: [snippet, similarity]
 
     Document:
@@ -524,6 +576,14 @@ components:
           type: array
           items:
             type: string
+        rootDocumentId:
+          type: integer
+        parentDocumentId:
+          type: ["integer", "null"]
+        documentVersion:
+          type: integer
+        lastIngestionRunId:
+          type: ["string", "null"]
         createdBy:
           type: ["string", "null"]
         rejectionReason:

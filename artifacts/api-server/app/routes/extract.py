@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.auth import AuthedUser, require_admin
+from app.local_extract import extract_text_locally
 from app.pwc_ai import extract_text_from_base64
 
 router = APIRouter()
+log = logging.getLogger("api-server.extract")
 
 MIME_MAP: dict[str, str] = {
     # Images
@@ -54,6 +57,7 @@ EXT_MAP: dict[str, str] = {
 }
 
 MAX_BYTES = 50 * 1024 * 1024
+AI_FALLBACK_MAX_BYTES = 250 * 1024
 
 
 def _ext_to_mime(filename: str) -> str | None:
@@ -92,9 +96,35 @@ async def extract_document(
             text = raw.decode("utf-8", errors="replace")
         return {"text": text, "filename": file.filename or ""}
 
+    # Prefer deterministic parsers for office/pdf docs to avoid LLM token limits.
+    try:
+        local_text = extract_text_locally(detected, raw)
+        if local_text and local_text.strip():
+            return {"text": local_text, "filename": file.filename or ""}
+    except Exception as err:
+        log.warning("local extraction failed for %s: %s", file.filename, err)
+
+    if len(raw) > AI_FALLBACK_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "File is too large for AI fallback extraction after local parsing failed. "
+                "Please upload a smaller file or paste the text content directly."
+            ),
+        )
+
     try:
         b64 = base64.b64encode(raw).decode("ascii")
         text = await extract_text_from_base64(detected, b64, file.filename or "")
         return {"text": text, "filename": file.filename or ""}
     except Exception as err:
-        raise HTTPException(status_code=502, detail=str(err))
+        msg = str(err)
+        if "ContextWindowExceededError" in msg or "maximum number of tokens" in msg:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Extraction exceeded model context window. "
+                    "Please upload a smaller file or paste text directly."
+                ),
+            )
+        raise HTTPException(status_code=502, detail="Extraction service failed. Please try again.")

@@ -10,7 +10,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { ArrowLeft, Loader2, UploadCloud, FileText, X, Scan } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { ArrowLeft, Loader2, UploadCloud, FileText, X, Scan, AlertTriangle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useRef, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +43,45 @@ const formSchema = z.object({
   content: z.string().min(50, "Content must be at least 50 characters"),
 });
 
+type DuplicateConflict = {
+  message: string;
+  duplicateDocumentId: number;
+  duplicateDocumentName?: string;
+  duplicateDocumentStatus?: string;
+};
+
+function extractDuplicateConflict(err: unknown): DuplicateConflict | null {
+  if (!err || typeof err !== "object") return null;
+  const e = err as { status?: unknown; data?: unknown; message?: unknown };
+  if (typeof e.status !== "number" || e.status !== 409) return null;
+  if (!e.data || typeof e.data !== "object") return null;
+
+  const data = e.data as { error?: unknown; detail?: unknown };
+  const payload =
+    data.error && typeof data.error === "object"
+      ? (data.error as Record<string, unknown>)
+      : data.detail && typeof data.detail === "object"
+        ? (data.detail as Record<string, unknown>)
+        : null;
+  if (!payload) return null;
+  if (payload.code !== "exact_duplicate") return null;
+  if (typeof payload.duplicateDocumentId !== "number") return null;
+
+  const name =
+    typeof payload.duplicateDocumentName === "string" ? payload.duplicateDocumentName : undefined;
+  const status =
+    typeof payload.duplicateDocumentStatus === "string" ? payload.duplicateDocumentStatus : undefined;
+  const fallback = `Exact duplicate of document #${payload.duplicateDocumentId}.`;
+  const message = typeof payload.message === "string" ? payload.message : fallback;
+
+  return {
+    message,
+    duplicateDocumentId: payload.duplicateDocumentId,
+    duplicateDocumentName: name,
+    duplicateDocumentStatus: status,
+  };
+}
+
 export default function NewDocument() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -56,6 +96,7 @@ export default function NewDocument() {
   const [sourceType, setSourceType] = useState<"text" | "pdf" | "docx" | "txt">("text");
   const [extracting, setExtracting] = useState(false);
   const [pasteMode, setPasteMode] = useState(false);
+  const [duplicateConflict, setDuplicateConflict] = useState<DuplicateConflict | null>(null);
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
@@ -73,8 +114,15 @@ export default function NewDocument() {
         credentials: "include",
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Extraction failed" })) as { error?: string };
-        throw new Error(err.error ?? "Extraction failed");
+        const payload = await res.json().catch(() => ({ error: "Extraction failed" })) as { error?: unknown; detail?: unknown };
+        const errVal = payload.error ?? payload.detail;
+        const msg =
+          typeof errVal === "string"
+            ? errVal
+            : errVal && typeof errVal === "object" && "message" in errVal && typeof (errVal as { message?: unknown }).message === "string"
+              ? String((errVal as { message: string }).message)
+              : "Extraction failed";
+        throw new Error(msg);
       }
       const { text } = await res.json() as { text: string };
       if (!text || text.trim().length < 10) throw new Error("No text could be extracted from this file.");
@@ -83,6 +131,7 @@ export default function NewDocument() {
       form.setValue("name", baseName, { shouldValidate: true });
       setSourceType(inferSourceType(file.name));
       setDroppedFile({ name: file.name, size: file.size });
+      setDuplicateConflict(null);
     } catch (err) {
       toast({
         title: "Could not extract file",
@@ -110,6 +159,7 @@ export default function NewDocument() {
   const clearFile = () => {
     setDroppedFile(null);
     setPasteMode(false);
+    setDuplicateConflict(null);
     form.setValue("content", "");
     form.setValue("name", "");
     setSourceType("text");
@@ -132,11 +182,26 @@ export default function NewDocument() {
       const doc = await createDocument.mutateAsync({
         data: { ...values, sourceType, tags },
       });
+      setDuplicateConflict(null);
       queryClient.invalidateQueries({ queryKey: getListDocumentsQueryKey() });
       toast({ title: "Document submitted for approval" });
       setLocation(`/admin/documents/${doc.id}`);
-    } catch {
-      toast({ title: "Failed to submit document", variant: "destructive" });
+    } catch (err) {
+      const conflict = extractDuplicateConflict(err);
+      if (conflict) {
+        setDuplicateConflict(conflict);
+        toast({
+          title: "Duplicate blocked",
+          description: conflict.message,
+          variant: "destructive",
+        });
+        return;
+      }
+      toast({
+        title: "Failed to submit document",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
     }
   };
 
@@ -278,6 +343,26 @@ export default function NewDocument() {
                     </FormItem>
                   )}
                 />
+              )}
+
+              {duplicateConflict && (
+                <Alert variant="destructive">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertTitle>Exact duplicate blocked</AlertTitle>
+                  <AlertDescription>
+                    <p>{duplicateConflict.message}</p>
+                    <div className="mt-3">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setLocation(`/admin/documents/${duplicateConflict.duplicateDocumentId}`)}
+                      >
+                        Open existing document
+                      </Button>
+                    </div>
+                  </AlertDescription>
+                </Alert>
               )}
 
               {/* Textarea — only for paste mode */}

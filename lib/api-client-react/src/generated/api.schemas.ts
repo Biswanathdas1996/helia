@@ -74,15 +74,22 @@ export interface PiiFinding {
   type: string;
   value: string;
   replacement: string;
+  detector?: string;
+  confidence?: number;
 }
 
 export interface DuplicateFinding {
   snippet: string;
   similarity: number;
+  method?: string;
   /** @nullable */
   matchedDocumentId?: number | null;
   /** @nullable */
   matchedDocumentName?: string | null;
+  /** @nullable */
+  matchedChunkId?: number | null;
+  /** @minimum 0 */
+  sourceChunkPosition?: number;
 }
 
 export type DocumentSourceType =
@@ -116,6 +123,12 @@ export interface Document {
   chunkCount: number;
   tags: string[];
   keywords: string[];
+  rootDocumentId?: number;
+  /** @nullable */
+  parentDocumentId?: number | null;
+  documentVersion?: number;
+  /** @nullable */
+  lastIngestionRunId?: string | null;
   /** @nullable */
   createdBy?: string | null;
   /** @nullable */

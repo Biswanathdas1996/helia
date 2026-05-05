@@ -28,6 +28,7 @@ async def _init() -> AsyncIOMotorDatabase:
         db.chunks.create_index([("content", "text")]),
         db.chunks.create_index([("documentId", ASCENDING)]),
         db.documents.create_index([("status", ASCENDING)]),
+        db.documents.create_index([("status", ASCENDING), ("contentHash", ASCENDING)]),
         db.documents.create_index([("createdAt", DESCENDING)]),
         db.conversations.create_index([("userId", ASCENDING), ("updatedAt", DESCENDING)]),
         db.messages.create_index([("conversationId", ASCENDING), ("createdAt", ASCENDING)]),

@@ -9,8 +9,13 @@
 export interface DuplicateFinding {
   snippet: string;
   similarity: number;
+  method?: string;
   /** @nullable */
   matchedDocumentId?: number | null;
   /** @nullable */
   matchedDocumentName?: string | null;
+  /** @nullable */
+  matchedChunkId?: number | null;
+  /** @minimum 0 */
+  sourceChunkPosition?: number;
 }

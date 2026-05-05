@@ -20,6 +20,12 @@ export interface Document {
   chunkCount: number;
   tags: string[];
   keywords: string[];
+  rootDocumentId?: number;
+  /** @nullable */
+  parentDocumentId?: number | null;
+  documentVersion?: number;
+  /** @nullable */
+  lastIngestionRunId?: string | null;
   /** @nullable */
   createdBy?: string | null;
   /** @nullable */

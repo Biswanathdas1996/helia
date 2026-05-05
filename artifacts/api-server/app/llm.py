@@ -1,7 +1,7 @@
 """LLM + embedding client.
 
 Single provider: PwC GenAI gateway.
-- Chat:       ``vertex_ai.gemini-2.5-flash-image``
+- Chat:       ``vertex_ai.gemini-2.5-flash-image-image``
 - Embeddings: ``vertex_ai.gemini-embedding``
 
 The gateway is OpenAI-compatible at the wire level. Streaming uses standard
@@ -39,7 +39,7 @@ def embedding_dim() -> int:
             return int(raw)
         except ValueError:
             pass
-    # Vertex AI gemini-embedding (gecko family) outputs 768 dims by default.
+    # Keep this in sync with your Atlas vector index dimension.
     return 768
 
 

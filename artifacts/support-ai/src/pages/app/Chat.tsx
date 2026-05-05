@@ -20,6 +20,86 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
 
+const BULLET_RE = /^[-*]\s+/;
+const ORDERED_RE = /^\d+\.\s+/;
+const CITATION_RE = /\[(\d+)\]/g;
+
+function renderInlineCitations(text: string, keyPrefix: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  let last = 0;
+  let idx = 0;
+  let match: RegExpExecArray | null = null;
+
+  while ((match = CITATION_RE.exec(text)) !== null) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const n = match[1];
+    if (start > last) {
+      parts.push(text.slice(last, start));
+    }
+    parts.push(
+      <span
+        key={`${keyPrefix}-cite-${idx}`}
+        className="inline-flex items-center rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary align-middle mx-0.5"
+      >
+        [{n}]
+      </span>,
+    );
+    last = end;
+    idx += 1;
+  }
+
+  if (last < text.length) {
+    parts.push(text.slice(last));
+  }
+
+  return parts.length > 0 ? parts : [text];
+}
+
+function renderAssistantContent(content: string): React.ReactNode {
+  const blocks = content
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  return (
+    <div className="space-y-3 text-[15px] leading-7 text-foreground/95">
+      {blocks.map((block, blockIdx) => {
+        const lines = block
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean);
+
+        if (lines.length > 0 && lines.every((line) => BULLET_RE.test(line))) {
+          return (
+            <ul key={`ul-${blockIdx}`} className="list-disc pl-5 space-y-1.5 marker:text-primary">
+              {lines.map((line, liIdx) => (
+                <li key={`li-${blockIdx}-${liIdx}`}>{renderInlineCitations(line.replace(BULLET_RE, ""), `ul-${blockIdx}-${liIdx}`)}</li>
+              ))}
+            </ul>
+          );
+        }
+
+        if (lines.length > 0 && lines.every((line) => ORDERED_RE.test(line))) {
+          return (
+            <ol key={`ol-${blockIdx}`} className="list-decimal pl-5 space-y-1.5 marker:text-primary">
+              {lines.map((line, liIdx) => (
+                <li key={`oli-${blockIdx}-${liIdx}`}>{renderInlineCitations(line.replace(ORDERED_RE, ""), `ol-${blockIdx}-${liIdx}`)}</li>
+              ))}
+            </ol>
+          );
+        }
+
+        return (
+          <p key={`p-${blockIdx}`} className="whitespace-pre-wrap">
+            {renderInlineCitations(block, `p-${blockIdx}`)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function Chat() {
   const [location, setLocation] = useLocation();
   const params = useParams<{ id?: string }>();
@@ -210,9 +290,13 @@ export default function Chat() {
                 <div className={`p-4 rounded-2xl text-sm ${
                   msg.role === 'user' 
                     ? 'bg-primary text-primary-foreground rounded-tr-sm' 
-                    : 'bg-muted/50 border border-border text-foreground rounded-tl-sm'
+                    : 'bg-card border border-border/80 shadow-sm text-foreground rounded-tl-sm'
                 }`}>
-                  <div className="whitespace-pre-wrap">{msg.content}</div>
+                  {msg.role === 'assistant' ? (
+                    renderAssistantContent(msg.content)
+                  ) : (
+                    <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+                  )}
                 </div>
 
                 {msg.role === 'assistant' && (
@@ -222,7 +306,7 @@ export default function Chat() {
                         {msg.citations.map((cite, idx) => (
                           <Popover key={idx}>
                             <PopoverTrigger asChild>
-                              <Badge variant="outline" className="cursor-pointer hover:bg-accent text-xs py-0 h-5 font-normal text-muted-foreground">
+                              <Badge variant="outline" className="cursor-pointer hover:bg-accent text-xs py-0 h-6 font-normal text-muted-foreground border-border/70 bg-background/80">
                                 [{idx + 1}] {cite.documentName}
                               </Badge>
                             </PopoverTrigger>

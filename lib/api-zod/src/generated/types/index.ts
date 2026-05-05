@@ -10,6 +10,7 @@ export * from "./activityItem";
 export * from "./activityItemKind";
 export * from "./adminStats";
 export * from "./citation";
+export * from "./citationMetadata";
 export * from "./conversation";
 export * from "./conversationDetail";
 export * from "./createConversationInput";

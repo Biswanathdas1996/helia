@@ -86,6 +86,10 @@ export const ListDocumentsResponseItem = zod.object({
   chunkCount: zod.number(),
   tags: zod.array(zod.string()),
   keywords: zod.array(zod.string()),
+  rootDocumentId: zod.number().optional(),
+  parentDocumentId: zod.number().nullish(),
+  documentVersion: zod.number().optional(),
+  lastIngestionRunId: zod.string().nullish(),
   createdBy: zod.string().nullish(),
   rejectionReason: zod.string().nullish(),
   createdAt: zod.string(),
@@ -108,6 +112,8 @@ export const GetDocumentParams = zod.object({
   id: zod.coerce.number(),
 });
 
+export const getDocumentResponseTwoDuplicateFindingsItemSourceChunkPositionMin = 0;
+
 export const GetDocumentResponse = zod
   .object({
     id: zod.number(),
@@ -121,6 +127,10 @@ export const GetDocumentResponse = zod
     chunkCount: zod.number(),
     tags: zod.array(zod.string()),
     keywords: zod.array(zod.string()),
+    rootDocumentId: zod.number().optional(),
+    parentDocumentId: zod.number().nullish(),
+    documentVersion: zod.number().optional(),
+    lastIngestionRunId: zod.string().nullish(),
     createdBy: zod.string().nullish(),
     rejectionReason: zod.string().nullish(),
     createdAt: zod.string(),
@@ -135,14 +145,24 @@ export const GetDocumentResponse = zod
           type: zod.string(),
           value: zod.string(),
           replacement: zod.string(),
+          detector: zod.string().optional(),
+          confidence: zod.number().optional(),
         }),
       ),
       duplicateFindings: zod.array(
         zod.object({
           snippet: zod.string(),
           similarity: zod.number(),
+          method: zod.string().optional(),
           matchedDocumentId: zod.number().nullish(),
           matchedDocumentName: zod.string().nullish(),
+          matchedChunkId: zod.number().nullish(),
+          sourceChunkPosition: zod
+            .number()
+            .min(
+              getDocumentResponseTwoDuplicateFindingsItemSourceChunkPositionMin,
+            )
+            .optional(),
         }),
       ),
     }),
@@ -168,10 +188,34 @@ export const ApproveDocumentResponse = zod.object({
   chunkCount: zod.number(),
   tags: zod.array(zod.string()),
   keywords: zod.array(zod.string()),
+  rootDocumentId: zod.number().optional(),
+  parentDocumentId: zod.number().nullish(),
+  documentVersion: zod.number().optional(),
+  lastIngestionRunId: zod.string().nullish(),
   createdBy: zod.string().nullish(),
   rejectionReason: zod.string().nullish(),
   createdAt: zod.string(),
   updatedAt: zod.string(),
+});
+
+/**
+ * @summary Delete a specific indexed chunk from a document
+ */
+export const DeleteDocumentChunkParams = zod.object({
+  id: zod.coerce.number(),
+  chunkId: zod.coerce.number(),
+});
+
+/**
+ * @summary Manually exclude a duplicate chunk by source position
+ */
+export const excludeDocumentDuplicateChunkPathSourcePositionMin = 0;
+
+export const ExcludeDocumentDuplicateChunkParams = zod.object({
+  id: zod.coerce.number(),
+  sourcePosition: zod.coerce
+    .number()
+    .min(excludeDocumentDuplicateChunkPathSourcePositionMin),
 });
 
 export const RejectDocumentParams = zod.object({
@@ -194,6 +238,10 @@ export const RejectDocumentResponse = zod.object({
   chunkCount: zod.number(),
   tags: zod.array(zod.string()),
   keywords: zod.array(zod.string()),
+  rootDocumentId: zod.number().optional(),
+  parentDocumentId: zod.number().nullish(),
+  documentVersion: zod.number().optional(),
+  lastIngestionRunId: zod.string().nullish(),
   createdBy: zod.string().nullish(),
   rejectionReason: zod.string().nullish(),
   createdAt: zod.string(),
@@ -242,6 +290,14 @@ export const GetConversationResponse = zod.object({
           documentName: zod.string(),
           snippet: zod.string(),
           score: zod.number(),
+          metadata: zod.object({
+            fileName: zod.string(),
+            pageNumber: zod.number().nullish(),
+            keyPhrases: zod.array(zod.string()),
+            chunkPosition: zod.number().nullish(),
+            tokenCount: zod.number().nullish(),
+            sourceType: zod.string().nullish(),
+          }),
         }),
       ),
       latencyMs: zod.number().nullish(),
@@ -279,6 +335,14 @@ export const SendMessageResponse = zod.object({
         documentName: zod.string(),
         snippet: zod.string(),
         score: zod.number(),
+        metadata: zod.object({
+          fileName: zod.string(),
+          pageNumber: zod.number().nullish(),
+          keyPhrases: zod.array(zod.string()),
+          chunkPosition: zod.number().nullish(),
+          tokenCount: zod.number().nullish(),
+          sourceType: zod.string().nullish(),
+        }),
       }),
     ),
     latencyMs: zod.number().nullish(),
@@ -300,6 +364,14 @@ export const SendMessageResponse = zod.object({
         documentName: zod.string(),
         snippet: zod.string(),
         score: zod.number(),
+        metadata: zod.object({
+          fileName: zod.string(),
+          pageNumber: zod.number().nullish(),
+          keyPhrases: zod.array(zod.string()),
+          chunkPosition: zod.number().nullish(),
+          tokenCount: zod.number().nullish(),
+          sourceType: zod.string().nullish(),
+        }),
       }),
     ),
     latencyMs: zod.number().nullish(),
@@ -332,6 +404,14 @@ export const RateMessageResponse = zod.object({
       documentName: zod.string(),
       snippet: zod.string(),
       score: zod.number(),
+      metadata: zod.object({
+        fileName: zod.string(),
+        pageNumber: zod.number().nullish(),
+        keyPhrases: zod.array(zod.string()),
+        chunkPosition: zod.number().nullish(),
+        tokenCount: zod.number().nullish(),
+        sourceType: zod.string().nullish(),
+      }),
     }),
   ),
   latencyMs: zod.number().nullish(),

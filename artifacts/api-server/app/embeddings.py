@@ -18,10 +18,34 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     out: list[list[float]] = []
+    target_dim = llm.embedding_dim()
+    warned_dim_mismatch = False
     for i in range(0, len(texts), _EMBED_BATCH):
         chunk = texts[i : i + _EMBED_BATCH]
-        out.extend(await llm.embed(chunk))
+        vectors = await llm.embed(chunk)
+        for vec in vectors:
+            if vec and len(vec) != target_dim and not warned_dim_mismatch:
+                warned_dim_mismatch = True
+                action = "truncating" if len(vec) > target_dim else "padding"
+                log.warning(
+                    "Embedding dimension mismatch (received=%d expected=%d); %s to match index",
+                    len(vec),
+                    target_dim,
+                    action,
+                )
+            out.append(_fit_vector_dim(vec, target_dim))
     return out
+
+
+def _fit_vector_dim(vec: list[float], target_dim: int) -> list[float]:
+    if target_dim <= 0 or not vec:
+        return vec
+    size = len(vec)
+    if size == target_dim:
+        return vec
+    if size > target_dim:
+        return vec[:target_dim]
+    return vec + [0.0] * (target_dim - size)
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -59,12 +83,15 @@ async def vector_search(
     ``infra/atlas-vector-index.json``). On failure the caller should fall
     back to BM25-only retrieval.
     """
+    query_vector = _fit_vector_dim(query_embedding, llm.embedding_dim())
+    if not query_vector:
+        return []
     pipeline: list[dict] = [
         {
             "$vectorSearch": {
                 "index": index_name(),
                 "path": "embedding",
-                "queryVector": query_embedding,
+                "queryVector": query_vector,
                 "numCandidates": max(50, limit * 10),
                 "limit": limit,
             }

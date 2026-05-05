@@ -5,6 +5,7 @@
  * AI Customer Query Resolution Platform
  * OpenAPI spec version: 0.1.0
  */
+import type { CitationMetadata } from "./citationMetadata";
 
 export interface Citation {
   chunkId: number;
@@ -12,4 +13,5 @@ export interface Citation {
   documentName: string;
   snippet: string;
   score: number;
+  metadata: CitationMetadata;
 }

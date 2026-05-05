@@ -807,6 +807,182 @@ export const useApproveDocument = <
   return useMutation(getApproveDocumentMutationOptions(options));
 };
 
+/**
+ * @summary Delete a specific indexed chunk from a document
+ */
+export const getDeleteDocumentChunkUrl = (id: number, chunkId: number) => {
+  return `/api/documents/${id}/chunks/${chunkId}`;
+};
+
+export const deleteDocumentChunk = async (
+  id: number,
+  chunkId: number,
+  options?: RequestInit,
+): Promise<void> => {
+  return customFetch<void>(getDeleteDocumentChunkUrl(id, chunkId), {
+    ...options,
+    method: "DELETE",
+  });
+};
+
+export const getDeleteDocumentChunkMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteDocumentChunk>>,
+    TError,
+    { id: number; chunkId: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof deleteDocumentChunk>>,
+  TError,
+  { id: number; chunkId: number },
+  TContext
+> => {
+  const mutationKey = ["deleteDocumentChunk"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof deleteDocumentChunk>>,
+    { id: number; chunkId: number }
+  > = (props) => {
+    const { id, chunkId } = props ?? {};
+
+    return deleteDocumentChunk(id, chunkId, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type DeleteDocumentChunkMutationResult = NonNullable<
+  Awaited<ReturnType<typeof deleteDocumentChunk>>
+>;
+
+export type DeleteDocumentChunkMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Delete a specific indexed chunk from a document
+ */
+export const useDeleteDocumentChunk = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteDocumentChunk>>,
+    TError,
+    { id: number; chunkId: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof deleteDocumentChunk>>,
+  TError,
+  { id: number; chunkId: number },
+  TContext
+> => {
+  return useMutation(getDeleteDocumentChunkMutationOptions(options));
+};
+
+/**
+ * @summary Manually exclude a duplicate chunk by source position
+ */
+export const getExcludeDocumentDuplicateChunkUrl = (
+  id: number,
+  sourcePosition: number,
+) => {
+  return `/api/documents/${id}/duplicates/${sourcePosition}`;
+};
+
+export const excludeDocumentDuplicateChunk = async (
+  id: number,
+  sourcePosition: number,
+  options?: RequestInit,
+): Promise<void> => {
+  return customFetch<void>(
+    getExcludeDocumentDuplicateChunkUrl(id, sourcePosition),
+    {
+      ...options,
+      method: "DELETE",
+    },
+  );
+};
+
+export const getExcludeDocumentDuplicateChunkMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof excludeDocumentDuplicateChunk>>,
+    TError,
+    { id: number; sourcePosition: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof excludeDocumentDuplicateChunk>>,
+  TError,
+  { id: number; sourcePosition: number },
+  TContext
+> => {
+  const mutationKey = ["excludeDocumentDuplicateChunk"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof excludeDocumentDuplicateChunk>>,
+    { id: number; sourcePosition: number }
+  > = (props) => {
+    const { id, sourcePosition } = props ?? {};
+
+    return excludeDocumentDuplicateChunk(id, sourcePosition, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ExcludeDocumentDuplicateChunkMutationResult = NonNullable<
+  Awaited<ReturnType<typeof excludeDocumentDuplicateChunk>>
+>;
+
+export type ExcludeDocumentDuplicateChunkMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Manually exclude a duplicate chunk by source position
+ */
+export const useExcludeDocumentDuplicateChunk = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof excludeDocumentDuplicateChunk>>,
+    TError,
+    { id: number; sourcePosition: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof excludeDocumentDuplicateChunk>>,
+  TError,
+  { id: number; sourcePosition: number },
+  TContext
+> => {
+  return useMutation(getExcludeDocumentDuplicateChunkMutationOptions(options));
+};
+
 export const getRejectDocumentUrl = (id: number) => {
   return `/api/documents/${id}/reject`;
 };

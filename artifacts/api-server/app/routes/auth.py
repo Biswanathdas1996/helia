@@ -54,6 +54,34 @@ async def register(body: RegisterBody, request: Request, response: Response) -> 
     db = await get_db()
     existing = await db.users.find_one({"email": email})
     if existing:
+        # Backward compatibility: some legacy/imported users may not have a local password set.
+        if not existing.get("passwordHash"):
+            now = datetime.now(timezone.utc)
+            first_name = (body.firstName or "").strip() or existing.get("firstName")
+            last_name = (body.lastName or "").strip() or existing.get("lastName")
+            await db.users.update_one(
+                {"_id": existing["_id"]},
+                {
+                    "$set": {
+                        "passwordHash": hash_password(body.password),
+                        "firstName": first_name,
+                        "lastName": last_name,
+                        "updatedAt": now,
+                    }
+                },
+            )
+
+            token = create_token(existing["_id"])
+            set_auth_cookie(response, token)
+            await audit_log(action="auth.register.claim", actor=email, target=existing["_id"])
+
+            return {
+                "userId": existing["_id"],
+                "email": existing.get("email", email),
+                "firstName": first_name,
+                "lastName": last_name,
+                "imageUrl": existing.get("imageUrl"),
+            }
         raise HTTPException(status_code=409, detail="An account with that email already exists")
 
     is_first_user = (await db.users.count_documents({}, limit=1)) == 0

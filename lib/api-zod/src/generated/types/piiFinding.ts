@@ -10,4 +10,6 @@ export interface PiiFinding {
   type: string;
   value: string;
   replacement: string;
+  detector?: string;
+  confidence?: number;
 }
