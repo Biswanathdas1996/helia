@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { useLocation, useParams } from "wouter";
 import {
   useListConversations,
@@ -26,7 +27,6 @@ import {
   PanelLeftOpen,
   Share2,
   CheckCircle2,
-  CircleDashed,
   AlertTriangle,
   History,
   ChevronRight
@@ -305,6 +305,52 @@ type ProcessStep = {
   status: ProcessStepStatus;
 };
 
+/** Maps SSE process step names (see api-server chat routes) to concise UI copy. */
+const PROCESS_STEP_LABELS: Record<string, string> = {
+  "Saving user prompt": "Saving your message",
+  "Updating conversation metadata": "Updating this conversation",
+  "Checking ticket escalation intent": "Reviewing escalation options",
+  "Preparing escalation guidance": "Preparing guidance",
+  "Enhancing user query": "Refining your question",
+  "Retrieving relevant knowledge": "Searching verified documentation",
+  "Loading user memory": "Applying saved context",
+  "Composing model prompt": "Preparing the assistant context",
+  "Generating assistant response": "Drafting the reply",
+  "Saving assistant response": "Saving the reply",
+  Completed: "Wrapping up",
+  "Streaming failed": "Could not complete this response",
+};
+
+function presentationForProcessStep(step: ProcessStep): {
+  caption: string;
+  label: string;
+  ariaLabel: string;
+} {
+  const label = PROCESS_STEP_LABELS[step.name] ?? step.name;
+  switch (step.status) {
+    case "started":
+      return {
+        caption: "In progress",
+        label,
+        ariaLabel: `Assistant is working: ${label}`,
+      };
+    case "completed":
+      return {
+        caption: "Completed",
+        label,
+        ariaLabel: `Step completed: ${label}`,
+      };
+    case "error":
+      return {
+        caption: "Attention needed",
+        label,
+        ariaLabel: `Something went wrong: ${label}`,
+      };
+    default:
+      return { caption: "Status", label, ariaLabel: label };
+  }
+}
+
 type SseEvent = { event: string; data: string };
 
 async function* iterSseEvents(
@@ -388,6 +434,20 @@ export default function Chat() {
   const memoryLayout = useMemo(
     () => buildMemoryGraphLayout(memoryGraph.data?.nodes, memoryGraph.data?.edges),
     [memoryGraph.data?.nodes, memoryGraph.data?.edges],
+  );
+
+  const activeProcessStep = useMemo(() => {
+    if (processSteps.length === 0) return null;
+    const started = [...processSteps].reverse().find((s) => s.status === "started");
+    if (started) return started;
+    const failed = [...processSteps].reverse().find((s) => s.status === "error");
+    if (failed) return failed;
+    return processSteps[processSteps.length - 1] ?? null;
+  }, [processSteps]);
+
+  const activeProcessPresentation = useMemo(
+    () => (activeProcessStep ? presentationForProcessStep(activeProcessStep) : null),
+    [activeProcessStep],
   );
 
   useEffect(() => {
@@ -962,27 +1022,50 @@ export default function Chat() {
             </div>
           )}
 
-          {isStreaming && processSteps.length > 0 && (
+          {isStreaming && activeProcessStep && activeProcessPresentation && (
             <div className="max-w-4xl mx-auto">
-              <div className="rounded-xl border border-border/70 bg-muted/30 px-4 py-3">
-                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-2">
-                  Processing steps
+              <output
+                className={cn(
+                  "flex items-center gap-3 rounded-xl border border-border/50 bg-card/80 px-4 py-3 shadow-sm backdrop-blur-md",
+                  "ring-1 ring-black/[0.03] dark:ring-white/[0.06]",
+                )}
+                aria-live="polite"
+                aria-label={activeProcessPresentation.ariaLabel}
+              >
+                <div
+                  className={cn(
+                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted/50 shadow-inner ring-1 ring-border/40",
+                    activeProcessStep.status === "error" && "bg-destructive/10 ring-destructive/20",
+                  )}
+                >
+                  {activeProcessStep.status === "completed" ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-500" aria-hidden />
+                  ) : activeProcessStep.status === "error" ? (
+                    <AlertTriangle className="h-4 w-4 text-destructive" aria-hidden />
+                  ) : (
+                    <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden />
+                  )}
                 </div>
-                <div className="space-y-1.5">
-                  {processSteps.map((step, idx) => (
-                    <div key={`${step.name}-${idx}`} className="flex items-center gap-2 text-sm text-foreground/85">
-                      {step.status === "completed" ? (
-                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                      ) : step.status === "error" ? (
-                        <AlertTriangle className="h-4 w-4 text-destructive" />
-                      ) : (
-                        <CircleDashed className="h-4 w-4 text-primary animate-spin" />
-                      )}
-                      <span>{step.name}</span>
-                    </div>
-                  ))}
+                <div className="min-w-0 flex-1 overflow-hidden">
+                  <AnimatePresence mode="wait" initial={false}>
+                    <motion.div
+                      key={`${activeProcessStep.name}-${activeProcessStep.status}`}
+                      initial={{ opacity: 0, y: 4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                      className="space-y-0.5"
+                    >
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                        {activeProcessPresentation.caption}
+                      </p>
+                      <p className="truncate text-sm font-medium leading-snug text-foreground">
+                        {activeProcessPresentation.label}
+                      </p>
+                    </motion.div>
+                  </AnimatePresence>
                 </div>
-              </div>
+              </output>
             </div>
           )}
 
