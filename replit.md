@@ -14,7 +14,7 @@ pnpm workspace monorepo with a mixed-language stack: the React frontend and Open
 - **Database**: MongoDB Atlas (single cluster used for app data and retrieval). `MONGODB_URI` env var. Numeric IDs are minted via a `counters` collection (`next_id(name)` in `app/db.py`). Retrieval uses Mongo `$text` (BM25-ish) AND — when configured — Atlas Vector Search over `chunks.embedding`.
 - **Validation**: Zod (`zod/v4`) on the client; Pydantic v2 on the server
 - **API codegen**: Orval (from OpenAPI spec) — frontend hooks unchanged for the existing endpoints. `/api/chat/conversations/{id}/messages/stream` and `/api/tickets/active-summary` are not yet covered by the spec; they are exposed for future client work.
-- **LLM**: PwC GenAI gateway. Chat = `vertex_ai.gemini-2.5-flash-image-image`, embeddings = `vertex_ai.gemini-embedding`. The gateway is OpenAI-compatible at the wire level (`/chat/completions`, `/embeddings`).
+- **LLM**: PwC GenAI gateway. Chat = `vertex_ai.gemini-2.5-flash-image`, embeddings = `vertex_ai.gemini-embedding`. The gateway is OpenAI-compatible at the wire level (`/chat/completions`, `/embeddings`).
 - **Vector search**: Atlas Vector Search over 768-dim Gemini embeddings (`MONGODB_VECTOR_SEARCH=true` after creating the index — see `infra/atlas-vector-index.json`). Falls back gracefully to BM25-only when not configured.
 - **Cache**: Redis when `REDIS_URL` is set; in-process LRU otherwise. Used for retrieval and rate-limiting.
 - **Observability**: `/api/metrics` (Prometheus), structured JSON-ish stdout logs, Mongo `audit_logs` collection.

@@ -1,7 +1,7 @@
 """LLM + embedding client.
 
 Single provider: PwC GenAI gateway.
-- Chat:       ``vertex_ai.gemini-2.5-flash-image-image``
+- Chat:       ``vertex_ai.gemini-2.5-flash-image``
 - Embeddings: ``vertex_ai.gemini-embedding``
 
 The gateway is OpenAI-compatible at the wire level. Streaming uses standard

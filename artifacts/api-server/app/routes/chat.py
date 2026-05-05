@@ -25,6 +25,17 @@ log = logging.getLogger("api-server.chat")
 
 _RETRIEVAL_CACHE_TTL = 300
 _MEMORY_GRAPH_QUERY_FALLBACK = "user preferences profile support history"
+_UNANSWERABLE_PATTERNS = [
+    "do not contain information",
+    "cannot answer",
+    "can't answer",
+    "unable to answer",
+    "not enough information",
+    "don't have enough information",
+    "couldn't find a confident answer",
+    "open a support ticket",
+    "having trouble reaching the model",
+]
 _MEMORY_STOP_WORDS = {
     "about",
     "again",
@@ -221,6 +232,8 @@ async def send_message(
         else citations
     )
 
+    can_answer = _resolve_can_answer(answer, can_answer)
+
     assistant_msg = {
         "_id": await next_id("messages"),
         "conversationId": cid,
@@ -283,6 +296,7 @@ async def send_message_stream(
         )
 
         accum: list[str] = []
+        llm_failed = False
         try:
             async for delta in llm.chat_stream(turns):
                 accum.append(delta)
@@ -290,12 +304,14 @@ async def send_message_stream(
         except Exception as err:
             log.exception("stream LLM failed: %s", err)
             accum = ["I'm having trouble reaching the model right now. Please try again, or open a support ticket."]
+            llm_failed = True
 
         full = "".join(accum).strip()
         answer, can_answer, used_idx = _try_parse_structured(full)
         if not answer:
             answer = full or "I couldn't generate a response."
             can_answer = can_answer if can_answer is not None else True
+        can_answer = _resolve_can_answer(answer, can_answer, force_false=llm_failed)
 
         filtered = (
             [citations[n - 1] for n in used_idx if 1 <= n <= len(citations)]
@@ -461,16 +477,80 @@ async def _generate_answer(turns: list[llm.ChatTurn]) -> tuple[str, bool | None,
 
 
 def _try_parse_structured(raw: str) -> tuple[str, bool | None, list[int]]:
-    try:
-        parsed = json.loads(raw)
-        answer = parsed.get("answer") or ""
-        ca = parsed.get("canAnswer")
-        can_answer = ca if isinstance(ca, bool) else None
-        ui = parsed.get("usedCitations")
-        used_idx = [int(n) for n in ui] if isinstance(ui, list) else []
-        return answer, can_answer, used_idx
-    except Exception:
+    parsed = _try_parse_structured_json(raw)
+    if not parsed:
         return raw, None, []
+
+    answer_raw = parsed.get("answer")
+    answer = answer_raw.strip() if isinstance(answer_raw, str) else ""
+
+    ca = parsed.get("canAnswer")
+    can_answer = ca if isinstance(ca, bool) else None
+
+    ui = parsed.get("usedCitations")
+    used_idx = [_coerce_citation_index(n) for n in ui] if isinstance(ui, list) else []
+    used_idx = [n for n in used_idx if n is not None]
+    return answer, can_answer, used_idx
+
+
+def _try_parse_structured_json(raw: str) -> dict[str, object] | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    candidates = [text]
+
+    # Some models wrap JSON in markdown fences despite explicit JSON instructions.
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+    if fence_match:
+        fenced_json = fence_match.group(1).strip()
+        if fenced_json:
+            candidates.append(fenced_json)
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if 0 <= first_brace < last_brace:
+        candidates.append(text[first_brace : last_brace + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
+
+
+def _coerce_citation_index(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _resolve_can_answer(answer: str, can_answer: bool | None, *, force_false: bool = False) -> bool:
+    if force_false:
+        return False
+    if isinstance(can_answer, bool):
+        return can_answer
+    return not _looks_unanswerable(answer)
+
+
+def _looks_unanswerable(answer: str) -> bool:
+    normalized = (answer or "").strip().lower()
+    if not normalized:
+        return True
+    return any(pattern in normalized for pattern in _UNANSWERABLE_PATTERNS)
 
 
 def _build_memory_graph(memories: list[str]) -> dict[str, object]:

@@ -20,8 +20,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       PWC_AI_API_KEY: ${PWC_AI_API_KEY}
       PWC_TOKEN: ${PWC_TOKEN}
-      PWC_CHAT_MODEL: ${PWC_CHAT_MODEL:-vertex_ai.gemini-2.5-flash-image-image}
-      PWC_CHAT_MODEL_FALLBACKS: ${PWC_CHAT_MODEL_FALLBACKS:-vertex_ai.gemini-2.5-flash-image-image,vertex_ai.gemini-2.5-pro,vertex_ai.gemini-2.5-flash-image}
+      PWC_CHAT_MODEL: ${PWC_CHAT_MODEL:-vertex_ai.gemini-2.5-flash-image}
+      PWC_CHAT_MODEL_FALLBACKS: ${PWC_CHAT_MODEL_FALLBACKS:-vertex_ai.gemini-2.5-flash-image}
       PWC_EMBEDDING_MODEL: ${PWC_EMBEDDING_MODEL:-vertex_ai.gemini-embedding}
       MONGODB_VECTOR_SEARCH: ${MONGODB_VECTOR_SEARCH:-true}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-768}

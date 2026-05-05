@@ -15,7 +15,7 @@ from typing import Any, Literal, TypedDict
 import httpx
 
 BASE_URL = "https://genai-sharedservice-americas.pwc.com"
-CHAT_MODEL = "vertex_ai.gemini-2.5-flash-image-image"
+CHAT_MODEL = "vertex_ai.gemini-2.5-flash-image"
 EMBEDDING_MODEL = "vertex_ai.gemini-embedding"
 log = logging.getLogger("api-server.pwc_ai")
 
@@ -108,7 +108,10 @@ async def _post_chat_with_json_fallback(
     res = await client.post(f"{BASE_URL}/chat/completions", headers=_headers(), json=body)
     if json_mode and res.status_code >= 400:
         detail = res.text[:500]
-        if _should_retry_without_response_format(res.status_code, detail):
+        # Gemini image deployments may reject response_format even when the
+        # request is otherwise valid. Retry once without response_format.
+        model = str(body.get("model") or "")
+        if _should_retry_without_response_format(res.status_code, detail) or model.endswith("-image"):
             log.warning(
                 "JSON response_format rejected by gateway/model; retrying without response_format"
             )
@@ -126,18 +129,9 @@ def _chat_model_fallbacks(*, current: str, allowed: list[str] | None = None) -> 
             if model and model != current and model not in out:
                 out.append(model)
 
-    if current.endswith("-image"):
-        stripped = current[: -len("-image")]
-        if stripped and stripped not in out:
-            out.append(stripped)
-    elif current and f"{current}-image" not in out:
-        out.append(f"{current}-image")
-
     defaults = [
-        "vertex_ai.gemini-2.5-flash-image-image",
         "vertex_ai.gemini-2.5-flash-image",
         "vertex_ai.gemini-2.5-pro",
-        "vertex_ai.gemini-2.0-flash",
     ]
     for model in defaults:
         if model != current and model not in out:

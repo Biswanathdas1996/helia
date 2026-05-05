@@ -12,7 +12,7 @@ import {
 } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { Bot, FileText, Send, ThumbsDown, ThumbsUp, Ticket, AlertCircle, Loader2, MessageSquarePlus, Share2 } from "lucide-react";
+import { Bot, FileText, Send, ThumbsDown, ThumbsUp, Ticket, AlertCircle, Loader2, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Share2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -24,6 +24,59 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 const BULLET_RE = /^[-*]\s+/;
 const ORDERED_RE = /^\d+\.\s+/;
 const CITATION_RE = /\[(\d+)\]/g;
+
+function extractAssistantAnswer(content: string): string {
+  const text = content.trim();
+  if (!text) {
+    return content;
+  }
+
+  const candidates: string[] = [text];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced?.[1]) {
+    candidates.push(fenced[1].trim());
+  }
+
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(text.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { answer?: unknown };
+      if (typeof parsed.answer === "string" && parsed.answer.trim().length > 0) {
+        return parsed.answer.trim();
+      }
+    } catch {
+      // Ignore malformed JSON and continue rendering plain text.
+    }
+  }
+
+  return content;
+}
+
+function looksUnanswerable(content: string): boolean {
+  const text = extractAssistantAnswer(content).trim().toLowerCase();
+  if (!text) {
+    return true;
+  }
+
+  const patterns = [
+    "do not contain information",
+    "cannot answer",
+    "can't answer",
+    "unable to answer",
+    "not enough information",
+    "don't have enough information",
+    "couldn't find a confident answer",
+    "open a support ticket",
+    "having trouble reaching the model",
+  ];
+
+  return patterns.some((pattern) => text.includes(pattern));
+}
 
 type MemoryGraphNode = {
   id: string;
@@ -148,7 +201,8 @@ function renderInlineCitations(text: string, keyPrefix: string): React.ReactNode
 }
 
 function renderAssistantContent(content: string): React.ReactNode {
-  const blocks = content
+  const normalized = extractAssistantAnswer(content);
+  const blocks = normalized
     .split(/\n{2,}/)
     .map((b) => b.trim())
     .filter(Boolean);
@@ -211,6 +265,7 @@ export default function Chat() {
   const { toast } = useToast();
 
   const [input, setInput] = useState("");
+  const [isConversationsOpen, setIsConversationsOpen] = useState(true);
   const [memoryGraphOpen, setMemoryGraphOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -283,77 +338,95 @@ export default function Chat() {
   return (
     <div className="flex h-full bg-background">
       {/* Secondary Sidebar */}
-      <div className="w-80 border-r border-border bg-muted/20 flex flex-col h-full overflow-hidden">
-        <div className="p-4 border-b border-border">
-          <Button 
-            className="w-full justify-start text-left font-medium" 
-            variant={!currentId ? "secondary" : "outline"} 
-            onClick={() => setLocation("/app")}
-          >
-            <MessageSquarePlus className="mr-2 h-4 w-4" />
-            New Conversation
-          </Button>
-        </div>
+      <div
+        className={`border-r border-border bg-muted/20 h-full overflow-hidden transition-all duration-200 ${
+          isConversationsOpen ? "w-80" : "w-0 border-r-0"
+        }`}
+      >
+        <div className="w-80 h-full flex flex-col">
+          <div className="p-4 border-b border-border">
+            <Button
+              className="w-full justify-start text-left font-medium"
+              variant={!currentId ? "secondary" : "outline"}
+              onClick={() => setLocation("/app")}
+            >
+              <MessageSquarePlus className="mr-2 h-4 w-4" />
+              New Conversation
+            </Button>
+          </div>
 
-        {activeTickets.length > 0 && (
-          <div className="px-4 py-3 border-b border-border bg-primary/5">
-            <h3 className="text-xs font-semibold text-primary uppercase tracking-wider mb-2 flex items-center">
-              <AlertCircle className="h-3 w-3 mr-1" /> Open Tickets ({activeTickets.length})
-            </h3>
-            <div className="space-y-1">
-              {activeTickets.slice(0, 3).map(ticket => (
-                <Button 
-                  key={ticket.id} 
-                  variant="link" 
-                  className="w-full justify-start px-2 py-1 h-auto text-xs text-foreground/80 hover:text-foreground"
-                  onClick={() => setLocation(`/app/tickets/${ticket.id}`)}
-                >
-                  <Ticket className="h-3 w-3 mr-2 text-muted-foreground" />
-                  <span className="truncate">{ticket.subject}</span>
-                </Button>
-              ))}
+          {activeTickets.length > 0 && (
+            <div className="px-4 py-3 border-b border-border bg-primary/5">
+              <h3 className="text-xs font-semibold text-primary uppercase tracking-wider mb-2 flex items-center">
+                <AlertCircle className="h-3 w-3 mr-1" /> Open Tickets ({activeTickets.length})
+              </h3>
+              <div className="space-y-1">
+                {activeTickets.slice(0, 3).map(ticket => (
+                  <Button
+                    key={ticket.id}
+                    variant="link"
+                    className="w-full justify-start px-2 py-1 h-auto text-xs text-foreground/80 hover:text-foreground"
+                    onClick={() => setLocation(`/app/tickets/${ticket.id}`)}
+                  >
+                    <Ticket className="h-3 w-3 mr-2 text-muted-foreground" />
+                    <span className="truncate">{ticket.subject}</span>
+                  </Button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        <ScrollArea className="flex-1">
-          <div className="p-2 space-y-1">
-            {loadingConvos ? (
-              <div className="p-4 text-center text-sm text-muted-foreground">Loading...</div>
-            ) : conversations?.length === 0 ? (
-              <div className="p-4 text-center text-sm text-muted-foreground">No conversations yet</div>
-            ) : (
-              conversations?.map(convo => (
-                <Button
-                  key={convo.id}
-                  variant={currentId === convo.id ? "secondary" : "ghost"}
-                  className="w-full justify-start text-left h-auto py-3 px-3"
-                  onClick={() => setLocation(`/app/conversations/${convo.id}`)}
-                >
-                  <div className="flex flex-col items-start gap-1 overflow-hidden w-full">
-                    <span className="font-medium text-sm truncate w-full">{convo.title || "New Conversation"}</span>
-                    {convo.lastMessagePreview && (
-                      <span className="text-xs text-muted-foreground truncate w-full">{convo.lastMessagePreview}</span>
-                    )}
-                  </div>
-                </Button>
-              ))
-            )}
-          </div>
-        </ScrollArea>
+          <ScrollArea className="flex-1">
+            <div className="p-2 space-y-1">
+              {loadingConvos ? (
+                <div className="p-4 text-center text-sm text-muted-foreground">Loading...</div>
+              ) : conversations?.length === 0 ? (
+                <div className="p-4 text-center text-sm text-muted-foreground">No conversations yet</div>
+              ) : (
+                conversations?.map(convo => (
+                  <Button
+                    key={convo.id}
+                    variant={currentId === convo.id ? "secondary" : "ghost"}
+                    className="w-full justify-start text-left h-auto py-3 px-3"
+                    onClick={() => setLocation(`/app/conversations/${convo.id}`)}
+                  >
+                    <div className="flex flex-col items-start gap-1 overflow-hidden w-full">
+                      <span className="font-medium text-sm truncate w-full">{convo.title || "New Conversation"}</span>
+                      {convo.lastMessagePreview && (
+                        <span className="text-xs text-muted-foreground truncate w-full">{convo.lastMessagePreview}</span>
+                      )}
+                    </div>
+                  </Button>
+                ))
+              )}
+            </div>
+          </ScrollArea>
+        </div>
       </div>
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full bg-background relative">
         <div className="border-b border-border/70 bg-background/90 backdrop-blur-sm">
           <div className="max-w-4xl mx-auto px-4 md:px-8 py-3 flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="text-sm font-semibold truncate">
-                {activeConvo?.conversation?.title || "Conversation"}
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                Visualize user memory and related concepts for this thread.
-              </p>
+            <div className="min-w-0 flex items-start gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                onClick={() => setIsConversationsOpen((open) => !open)}
+                aria-label={isConversationsOpen ? "Collapse conversation list" : "Expand conversation list"}
+                title={isConversationsOpen ? "Collapse conversation list" : "Expand conversation list"}
+              >
+                {isConversationsOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+              </Button>
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold truncate">
+                  {activeConvo?.conversation?.title || "Conversation"}
+                </h2>
+                <p className="text-xs text-muted-foreground">
+                  Visualize user memory and related concepts for this thread.
+                </p>
+              </div>
             </div>
             <Button
               variant="outline"
@@ -498,14 +571,14 @@ export default function Chat() {
                   </div>
                 )}
                 
-                {msg.role === 'assistant' && msg.canAnswer === false && (
+                {msg.role === 'assistant' && (msg.canAnswer === false || looksUnanswerable(msg.content)) && (
                   <div className="mt-2 bg-secondary/50 border border-secondary p-3 rounded-lg flex items-center justify-between w-full">
                     <span className="text-sm text-foreground/80">I couldn't find a confident answer. Would you like to escalate this?</span>
                     <Button 
                       size="sm" 
                       onClick={() => setLocation(`/app/tickets/new?messageId=${msg.id}`)}
                     >
-                      Raise Ticket
+                      Create Ticket
                     </Button>
                   </div>
                 )}
