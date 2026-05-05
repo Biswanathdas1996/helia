@@ -62,12 +62,14 @@ def serialize_message(m: dict[str, Any]) -> dict[str, Any]:
         "id": m["_id"],
         "conversationId": m["conversationId"],
         "role": m["role"],
+        "kind": m.get("kind"),
         "content": m["content"],
         "citations": m.get("citations", []),
         "canAnswer": m.get("canAnswer"),
         "latencyMs": m.get("latencyMs"),
         "rating": m.get("rating"),
         "rewrittenQuery": m.get("rewrittenQuery"),
+        "ticketId": m.get("ticketId"),
         "createdAt": iso(m["createdAt"]),
     }
 

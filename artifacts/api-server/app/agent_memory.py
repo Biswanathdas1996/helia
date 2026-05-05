@@ -81,6 +81,26 @@ async def add_exchange_memory(user_id: str, user_text: str, assistant_text: str)
         log.warning("Mem0 add failed for user %s: %s", user_id, err)
 
 
+async def clear_user_memory(user_id: str) -> bool:
+    client = _get_client()
+    if not client:
+        return False
+
+    def _delete_all() -> Any:
+        try:
+            return client.delete_all(user_id=user_id)
+        except TypeError:
+            return client.delete_all(filters={"user_id": user_id})
+
+    try:
+        await asyncio.to_thread(_delete_all)
+    except Exception as err:
+        log.warning("Mem0 delete_all failed for user %s: %s", user_id, err)
+        raise RuntimeError("Failed to clear Mem0 memory") from err
+
+    return True
+
+
 def _extract_memory_strings(raw: Any, limit: int) -> list[str]:
     items = raw
     if isinstance(raw, dict):

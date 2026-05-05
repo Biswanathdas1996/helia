@@ -1,5 +1,12 @@
 import { useParams, useLocation } from "wouter";
-import { useGetTicket, useUpdateTicket, getGetTicketQueryKey, getListTicketsQueryKey } from "@workspace/api-client-react";
+import {
+  useGetTicket,
+  useUpdateTicket,
+  useGetConversation,
+  getGetTicketQueryKey,
+  getListTicketsQueryKey,
+  getGetConversationQueryKey,
+} from "@workspace/api-client-react";
 import { useGetMe } from "@workspace/api-client-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
@@ -42,6 +49,20 @@ export default function TicketDetail() {
   if (!ticket) return <div className="p-8">Ticket not found</div>;
 
   const isAdmin = me?.role === "admin";
+  const relatedConversationMatch = ticket.description.match(/\bConversation ID:\s*(\d+)\b/i);
+  const relatedConversationId = relatedConversationMatch
+    ? Number.parseInt(relatedConversationMatch[1], 10)
+    : null;
+
+  const { data: relatedConversation, isLoading: loadingRelatedConversation } = useGetConversation(
+    relatedConversationId as number,
+    {
+      query: {
+        enabled: Boolean(relatedConversationId),
+        queryKey: getGetConversationQueryKey(relatedConversationId as number),
+      },
+    },
+  );
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
@@ -108,10 +129,42 @@ export default function TicketDetail() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground mb-4">This ticket was escalated from a conversation.</p>
-                {/* Normally we'd fetch and show the message content here, keeping it simple for now */}
-                <Button variant="outline" size="sm" className="w-full justify-start" disabled>
-                  View original message (ID: {ticket.relatedMessageId})
-                </Button>
+                {relatedConversationId ? (
+                  <div className="space-y-3">
+                    <div className="text-xs text-muted-foreground">
+                      Conversation #{relatedConversationId}
+                    </div>
+                    {loadingRelatedConversation ? (
+                      <div className="text-sm text-muted-foreground">Loading conversation...</div>
+                    ) : relatedConversation?.messages?.length ? (
+                      <div className="max-h-80 overflow-y-auto rounded-md border border-border/70 bg-background p-3 space-y-2">
+                        {relatedConversation.messages.map((message) => (
+                          <div key={message.id} className="rounded-md border border-border/60 bg-muted/20 p-2.5">
+                            <div className="flex items-center justify-between gap-2 mb-1.5">
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                {message.role}
+                              </span>
+                              <span className="text-[11px] text-muted-foreground">
+                                {format(new Date(message.createdAt), "MMM d, h:mm a")}
+                              </span>
+                            </div>
+                            <div className="text-sm whitespace-pre-wrap leading-relaxed">
+                              {message.content}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-muted-foreground">
+                        Conversation details are unavailable right now.
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    Conversation details are unavailable for this ticket.
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}

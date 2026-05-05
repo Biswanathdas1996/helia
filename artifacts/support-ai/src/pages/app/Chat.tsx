@@ -5,6 +5,7 @@ import {
   useListConversations,
   useGetConversation,
   useCreateConversation,
+  useDeleteConversation,
   useListTickets,
   useRateMessage,
   getListConversationsQueryKey,
@@ -29,7 +30,8 @@ import {
   CheckCircle2,
   AlertTriangle,
   History,
-  ChevronRight
+  ChevronRight,
+  Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -40,10 +42,21 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 const BULLET_RE = /^[-*]\s+/;
 const ORDERED_RE = /^\d+\.\s+/;
 const CITATION_RE = /\[(\d+)\]/g;
+const BOLD_RE = /\*\*(.+?)\*\*/g;
+const TICKET_ID_RE = /ticket\s*#\s*(\d+)/i;
 
 function extractAssistantAnswer(content: string): string {
   const text = content.trim();
@@ -220,26 +233,116 @@ function renderInlineCitations(text: string, keyPrefix: string): React.ReactNode
   return parts.length > 0 ? parts : [text];
 }
 
-function renderAssistantContent(content: string): React.ReactNode {
+function renderFormattedInline(text: string, keyPrefix: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  let last = 0;
+  let idx = 0;
+  let match: RegExpExecArray | null = null;
+
+  BOLD_RE.lastIndex = 0;
+  while ((match = BOLD_RE.exec(text)) !== null) {
+    const start = match.index;
+    const end = start + match[0].length;
+
+    if (start > last) {
+      parts.push(...renderInlineCitations(text.slice(last, start), `${keyPrefix}-text-${idx}`));
+    }
+
+    parts.push(
+      <strong key={`${keyPrefix}-strong-${idx}`} className="font-semibold text-foreground">
+        {renderInlineCitations(match[1], `${keyPrefix}-strong-content-${idx}`)}
+      </strong>,
+    );
+
+    last = end;
+    idx += 1;
+  }
+
+  if (last < text.length) {
+    parts.push(...renderInlineCitations(text.slice(last), `${keyPrefix}-tail`));
+  }
+
+  return parts.length > 0 ? parts : renderInlineCitations(text, `${keyPrefix}-plain`);
+}
+
+function renderParagraph(text: string, keyPrefix: string, className = "whitespace-pre-wrap"): React.ReactNode {
+  return <p className={className}>{renderFormattedInline(text, keyPrefix)}</p>;
+}
+
+function splitAssistantSegments(content: string): string[] {
   const normalized = extractAssistantAnswer(content);
   const blocks = normalized
     .split(/\n{2,}/)
     .map((b) => b.trim())
     .filter(Boolean);
 
+  if (blocks.length === 0) {
+    return [];
+  }
+
+  const segments: string[] = [];
+  let current: string[] = [];
+
+  for (const block of blocks) {
+    const lines = block
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const isHeadingOnly = Boolean(lines[0]?.match(/^\*\*(.+?)\*\*$/)) && lines.length === 1;
+
+    if (isHeadingOnly) {
+      if (current.length > 0) {
+        segments.push(current.join("\n\n"));
+      }
+      current = [block];
+      continue;
+    }
+
+    current.push(block);
+  }
+
+  if (current.length > 0) {
+    segments.push(current.join("\n\n"));
+  }
+
+  return segments;
+}
+
+function renderAssistantContent(content: string): React.ReactNode {
+  const blocks = content
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
   return (
-    <div className="space-y-3 text-[15px] leading-7 text-foreground/95">
+    <div className="space-y-3.5 text-[15px] leading-7 text-foreground/95">
       {blocks.map((block, blockIdx) => {
         const lines = block
           .split("\n")
           .map((l) => l.trim())
           .filter(Boolean);
 
+        const headingMatch = lines[0]?.match(/^\*\*(.+?)\*\*$/);
+        if (headingMatch && lines.length > 1) {
+          const body = lines.slice(1).join("\n");
+          return (
+            <section
+              key={`section-${blockIdx}`}
+              className="space-y-2 rounded-2xl border border-border/50 bg-muted/[0.35] px-4 py-3 ring-1 ring-black/[0.02]"
+            >
+              <h4 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary/80">
+                {headingMatch[1]}
+              </h4>
+              {renderParagraph(body, `section-${blockIdx}`, "whitespace-pre-wrap text-[15px] leading-7 text-foreground/90")}
+            </section>
+          );
+        }
+
         if (lines.length > 0 && lines.every((line) => BULLET_RE.test(line))) {
           return (
             <ul key={`ul-${blockIdx}`} className="list-disc pl-5 space-y-1.5 marker:text-primary">
               {lines.map((line, liIdx) => (
-                <li key={`li-${blockIdx}-${liIdx}`}>{renderInlineCitations(line.replace(BULLET_RE, ""), `ul-${blockIdx}-${liIdx}`)}</li>
+                <li key={`li-${blockIdx}-${liIdx}`}>{renderFormattedInline(line.replace(BULLET_RE, ""), `ul-${blockIdx}-${liIdx}`)}</li>
               ))}
             </ul>
           );
@@ -249,17 +352,13 @@ function renderAssistantContent(content: string): React.ReactNode {
           return (
             <ol key={`ol-${blockIdx}`} className="list-decimal pl-5 space-y-1.5 marker:text-primary">
               {lines.map((line, liIdx) => (
-                <li key={`oli-${blockIdx}-${liIdx}`}>{renderInlineCitations(line.replace(ORDERED_RE, ""), `ol-${blockIdx}-${liIdx}`)}</li>
+                <li key={`oli-${blockIdx}-${liIdx}`}>{renderFormattedInline(line.replace(ORDERED_RE, ""), `ol-${blockIdx}-${liIdx}`)}</li>
               ))}
             </ol>
           );
         }
 
-        return (
-          <p key={`p-${blockIdx}`} className="whitespace-pre-wrap">
-            {renderInlineCitations(block, `p-${blockIdx}`)}
-          </p>
-        );
+        return <div key={`p-${blockIdx}`}>{renderParagraph(block, `p-${blockIdx}`)}</div>;
       })}
     </div>
   );
@@ -269,6 +368,8 @@ type StreamingMessage = {
   id: number;
   conversationId: number;
   role: "user" | "assistant";
+  kind?: "answer" | "clarification_question" | "ticket_offer" | "ticket_created" | null;
+  ticketId?: number | null;
   content: string;
   citations: ChatCitation[];
   rating?: "up" | "down" | null;
@@ -310,16 +411,47 @@ const PROCESS_STEP_LABELS: Record<string, string> = {
   "Saving user prompt": "Saving your message",
   "Updating conversation metadata": "Updating this conversation",
   "Checking ticket escalation intent": "Reviewing escalation options",
+  "Checking ticket creation consent": "Confirming ticket creation intent",
+  "Creating support ticket": "Creating the support ticket",
   "Preparing escalation guidance": "Preparing guidance",
   "Enhancing user query": "Refining your question",
   "Retrieving relevant knowledge": "Searching verified documentation",
   "Loading user memory": "Applying saved context",
-  "Composing model prompt": "Preparing the assistant context",
-  "Generating assistant response": "Drafting the reply",
+  "Reviewing investigation memory": "Reviewing what we already know",
+  "Planning next best action": "Deciding whether to ask or answer",
+  "Updating investigation memory": "Saving the latest investigation state",
+  "Asking a clarifying question": "Asking the most relevant follow-up",
+  "Composing grounded answer": "Preparing the grounded answer",
+  "Generating grounded answer": "Drafting the grounded answer",
   "Saving assistant response": "Saving the reply",
   Completed: "Wrapping up",
   "Streaming failed": "Could not complete this response",
 };
+
+function messageKindOf(
+  msg: { kind?: string | null; canAnswer?: boolean | null },
+): "answer" | "clarification_question" | "ticket_offer" | "ticket_created" {
+  if (
+    msg.kind === "clarification_question"
+    || msg.kind === "ticket_offer"
+    || msg.kind === "ticket_created"
+  ) {
+    return msg.kind;
+  }
+  return "answer";
+}
+
+function createdTicketIdOf(msg: { ticketId?: number | null; content: string }): number | null {
+  if (typeof msg.ticketId === "number" && Number.isInteger(msg.ticketId) && msg.ticketId > 0) {
+    return msg.ticketId;
+  }
+  const match = msg.content.match(TICKET_ID_RE);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
 
 function presentationForProcessStep(step: ProcessStep): {
   caption: string;
@@ -405,6 +537,24 @@ export default function Chat() {
   const rateMessage = useRateMessage();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const deleteConvo = useDeleteConversation({
+    mutation: {
+      onSuccess: (_data, variables) => {
+        const { id } = variables;
+        queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+        queryClient.removeQueries({ queryKey: getGetConversationQueryKey(id) });
+        queryClient.removeQueries({ queryKey: ["chat-memory-graph", id] });
+        if (currentId === id) {
+          setLocation("/app");
+        }
+        setDeleteTarget(null);
+        toast({ title: "Conversation deleted" });
+      },
+      onError: () => {
+        toast({ title: "Failed to delete conversation", variant: "destructive" });
+      },
+    },
+  });
 
   const [input, setInput] = useState("");
   const [isConversationsOpen, setIsConversationsOpen] = useState(true);
@@ -413,6 +563,9 @@ export default function Chat() {
   const [streamingUserMessage, setStreamingUserMessage] = useState<StreamingMessage | null>(null);
   const [streamingAssistantMessage, setStreamingAssistantMessage] = useState<StreamingAssistantMessage | null>(null);
   const [processSteps, setProcessSteps] = useState<ProcessStep[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null);
+  const [clearMemoryOpen, setClearMemoryOpen] = useState(false);
+  const [isClearingMemory, setIsClearingMemory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -618,8 +771,106 @@ export default function Chat() {
     }
   };
 
+  const handleConfirmDeleteConversation = () => {
+    if (!deleteTarget) return;
+    deleteConvo.mutate({ id: deleteTarget.id });
+  };
+
+  const handleClearMemory = async () => {
+    setIsClearingMemory(true);
+    try {
+      const res = await fetch("/api/me/memory", {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.detail ?? body?.error ?? "Failed to clear memory");
+      }
+
+      queryClient.removeQueries({
+        predicate: (query) => {
+          const [firstKey] = query.queryKey;
+          return typeof firstKey === "string" && firstKey.startsWith("/api/chat/conversations");
+        },
+      });
+      queryClient.removeQueries({
+        predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "chat-memory-graph",
+      });
+      await queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+      setLocation("/app");
+      setClearMemoryOpen(false);
+      toast({ title: "Agent memory cleared" });
+    } catch {
+      toast({
+        title: "Failed to clear memory",
+        description: "Long-term or local memory could not be fully cleared.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsClearingMemory(false);
+    }
+  };
+
   return (
     <div className="flex h-full bg-background">
+      <AlertDialog
+        open={clearMemoryOpen}
+        onOpenChange={(open) => {
+          if (!isClearingMemory) {
+            setClearMemoryOpen(open);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear all saved memory?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes your saved conversations and the long-term memory stored for your account, including Mem0. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isClearingMemory}>Cancel</AlertDialogCancel>
+            <Button type="button" variant="destructive" disabled={isClearingMemory} onClick={handleClearMemory}>
+              {isClearingMemory ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+              Clear memory
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this conversation?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget ? (
+                <>
+                  <span className="line-clamp-2 font-medium text-foreground">{deleteTarget.title}</span>{" "}
+                  will be removed permanently. This cannot be undone.
+                </>
+              ) : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteConvo.isPending}>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deleteConvo.isPending}
+              onClick={handleConfirmDeleteConversation}
+            >
+              {deleteConvo.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {/* Secondary Sidebar */}
       <div
         className={`border-r border-border bg-muted/20 h-full overflow-hidden transition-all duration-200 ${
@@ -628,19 +879,31 @@ export default function Chat() {
       >
         <div className="w-80 h-full flex flex-col bg-gradient-to-b from-muted/40 via-muted/25 to-background">
           <div className="p-3 border-b border-border/80">
-            <Button
-              className={cn(
-                "w-full justify-start gap-2 rounded-xl h-11 font-medium shadow-sm",
-                currentId
-                  ? "border border-border/60 bg-background hover:bg-background/90"
-                  : null
-              )}
-              variant={!currentId ? "default" : "outline"}
-              onClick={() => setLocation("/app")}
-            >
-              <MessageSquarePlus className="h-4 w-4 shrink-0" />
-              New conversation
-            </Button>
+            <div className="flex flex-col gap-2">
+              <Button
+                className={cn(
+                  "w-full justify-start gap-2 rounded-xl h-11 font-medium shadow-sm",
+                  currentId
+                    ? "border border-border/60 bg-background hover:bg-background/90"
+                    : null
+                )}
+                variant={!currentId ? "default" : "outline"}
+                onClick={() => setLocation("/app")}
+              >
+                <MessageSquarePlus className="h-4 w-4 shrink-0" />
+                New conversation
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full justify-start gap-2 rounded-xl h-10 border-border/60 bg-background/80 hover:bg-destructive/5 hover:text-destructive"
+                onClick={() => setClearMemoryOpen(true)}
+                disabled={isClearingMemory}
+              >
+                <Trash2 className="h-4 w-4 shrink-0" />
+                Clear saved memory
+              </Button>
+            </div>
           </div>
 
           {activeTickets.length > 0 && (
@@ -725,20 +988,25 @@ export default function Chat() {
                       timeLabel = "";
                     }
                     return (
-                      <Button
+                      <div
                         key={convo.id}
-                        variant="ghost"
                         className={cn(
-                          "group relative w-full min-w-0 max-w-full justify-start overflow-hidden text-left h-auto min-h-0",
-                          "p-0 rounded-2xl border font-normal whitespace-normal shadow-sm",
-                          "transition-[transform,background-color,border-color,box-shadow] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                          "group relative w-full min-w-0 max-w-full rounded-2xl border font-normal whitespace-normal shadow-sm",
+                          "transition-[transform,background-color,border-color,box-shadow] duration-200 ease-out",
                           active
                             ? "border-border/80 bg-background shadow-[0_4px_20px_-10px_rgba(15,23,42,0.18)] ring-1 ring-primary/15 dark:shadow-none"
                             : "border-border/35 bg-muted/20 hover:bg-muted/40 hover:border-border/55 hover:shadow-[0_2px_12px_-6px_rgba(15,23,42,0.14)] dark:hover:shadow-none"
                         )}
-                        onClick={() => setLocation(`/app/conversations/${convo.id}`)}
                       >
-                        <div className="flex min-w-0 w-full gap-2.5 overflow-hidden px-3 py-2.5">
+                        <button
+                          type="button"
+                          className={cn(
+                            "flex min-w-0 w-full gap-2.5 overflow-hidden rounded-2xl px-3 py-2.5 pr-10 text-left outline-none transition-colors duration-200",
+                            "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                            active ? "" : "hover:bg-transparent"
+                          )}
+                          onClick={() => setLocation(`/app/conversations/${convo.id}`)}
+                        >
                           <div
                             className={cn(
                               "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-sm ring-1 transition-colors duration-200",
@@ -782,8 +1050,32 @@ export default function Chat() {
                               <p className="text-[11px] text-muted-foreground/65 italic leading-snug">No preview yet</p>
                             )}
                           </div>
-                        </div>
-                      </Button>
+                        </button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          disabled={deleteConvo.isPending}
+                          className={cn(
+                            "absolute right-2 top-2 z-[1] h-8 w-8 shrink-0 rounded-lg",
+                            "text-muted-foreground/55 hover:bg-destructive/10 hover:text-destructive",
+                            "opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto",
+                            "focus-visible:opacity-100 focus-visible:pointer-events-auto"
+                          )}
+                          aria-label={`Delete conversation: ${convo.title || "New conversation"}`}
+                          title="Delete conversation"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDeleteTarget({
+                              id: convo.id,
+                              title: (convo.title || "New conversation").trim() || "New conversation",
+                            });
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     );
                   })}
                 </div>
@@ -835,9 +1127,9 @@ export default function Chat() {
             <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mb-6">
               <Bot className="h-8 w-8 text-primary" />
             </div>
-            <h2 className="text-2xl font-semibold mb-2">How can I help you today?</h2>
+            <h2 className="text-2xl font-semibold mb-2">Tell me what is going wrong</h2>
             <p className="text-muted-foreground max-w-md">
-              Ask any question about our products, services, or internal documentation.
+              I will investigate the issue, ask only the follow-up questions that matter, and answer from verified documentation when I have enough evidence.
             </p>
             <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl w-full pointer-events-auto">
               {[
@@ -884,27 +1176,42 @@ export default function Chat() {
               )}
               
               <div className={`flex flex-col gap-2 max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                <div className={
-                  msg.role === 'user'
-                    ? 'px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm'
-                    : 'w-full px-5 py-4 rounded-2xl rounded-tl-sm text-sm bg-card border border-border/60 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_12px_rgba(15,23,42,0.04)] text-foreground'
-                }>
-                  {msg.role === 'assistant' ? (
-                    <>
-                      {renderAssistantContent(msg.content)}
-                      {(msg as { rewrittenQuery?: string | null }).rewrittenQuery && (
-                        <div className="mt-4 pt-3 border-t border-border/50">
-                          <p className="text-[11px] leading-snug text-muted-foreground/80">
-                            <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Rewritten query</span>
-                            <span className="italic">{(msg as { rewrittenQuery?: string | null }).rewrittenQuery}</span>
-                          </p>
-                        </div>
-                      )}
-                    </>
-                  ) : (
+                {msg.role === 'assistant' && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) !== 'answer' && (
+                  <Badge variant="secondary" className="text-[11px] font-medium">
+                    {messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'clarification_question'
+                      ? 'Investigating'
+                      : messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'ticket_created'
+                        ? 'Ticket created'
+                        : 'Escalation option'}
+                  </Badge>
+                )}
+                {msg.role === 'assistant' ? (
+                  <div className="w-full space-y-3">
+                    {splitAssistantSegments(msg.content).map((segment, segmentIdx, segments) => (
+                      <motion.div
+                        key={`${msg.id}-segment-${segmentIdx}`}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.22, delay: segmentIdx * 0.08, ease: "easeOut" }}
+                        className="w-full px-5 py-4 rounded-[24px] rounded-tl-md text-sm bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] text-foreground ring-1 ring-white/70 backdrop-blur-sm"
+                      >
+                        {renderAssistantContent(segment)}
+                        {segmentIdx === segments.length - 1 && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'answer' && (msg as { rewrittenQuery?: string | null }).rewrittenQuery && (
+                          <div className="mt-4 pt-3 border-t border-border/50">
+                            <p className="text-[11px] leading-snug text-muted-foreground/80">
+                              <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Rewritten query</span>
+                              <span className="italic">{(msg as { rewrittenQuery?: string | null }).rewrittenQuery}</span>
+                            </p>
+                          </div>
+                        )}
+                      </motion.div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
                     <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
-                  )}
-                </div>
+                  </div>
+                )}
 
                 {msg.role === 'assistant' && (
                   <div className="flex flex-wrap items-center gap-2 mt-1">
@@ -950,6 +1257,8 @@ export default function Chat() {
                     )}
                     
                     <div className="flex items-center gap-1 ml-auto">
+                      {messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'answer' && (
+                        <>
                       <Button 
                         variant="ghost" 
                         size="icon" 
@@ -966,18 +1275,20 @@ export default function Chat() {
                       >
                         <ThumbsDown className="h-3 w-3" />
                       </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}
                 
-                {msg.role === 'assistant' && (msg.canAnswer === false || looksUnanswerable(msg.content)) && (
+                {msg.role === 'assistant' && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'ticket_created' && createdTicketIdOf(msg as { ticketId?: number | null; content: string }) && (
                   <div className="mt-2 bg-secondary/50 border border-secondary p-3 rounded-lg flex items-center justify-between w-full">
-                    <span className="text-sm text-foreground/80">I couldn't find a confident answer. Would you like to escalate this?</span>
-                    <Button 
-                      size="sm" 
-                      onClick={() => setLocation(`/app/tickets/new?messageId=${msg.id}`)}
+                    <span className="text-sm text-foreground/80">Your escalation ticket is open and ready for follow-up.</span>
+                    <Button
+                      size="sm"
+                      onClick={() => setLocation(`/app/tickets/${createdTicketIdOf(msg as { ticketId?: number | null; content: string })}`)}
                     >
-                      Create Ticket
+                      Open Ticket
                     </Button>
                   </div>
                 )}
@@ -1001,9 +1312,19 @@ export default function Chat() {
                 <Bot className="h-4 w-4 text-primary" />
               </div>
               <div className="flex flex-col gap-2 max-w-[80%] items-start">
-                <div className="w-full px-5 py-4 rounded-2xl rounded-tl-sm text-sm bg-card border border-border/60 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_12px_rgba(15,23,42,0.04)] text-foreground">
-                  {renderAssistantContent(streamingAssistantMessage.content)}
-                  <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse rounded-sm" />
+                <div className="w-full space-y-3">
+                  {splitAssistantSegments(streamingAssistantMessage.content).map((segment, segmentIdx, segments) => (
+                    <motion.div
+                      key={`stream-segment-${segmentIdx}`}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.22, delay: segmentIdx * 0.08, ease: "easeOut" }}
+                      className="w-full px-5 py-4 rounded-[24px] rounded-tl-md text-sm bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] text-foreground ring-1 ring-white/70 backdrop-blur-sm"
+                    >
+                      {renderAssistantContent(segment)}
+                      {segmentIdx === segments.length - 1 && <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse rounded-sm" />}
+                    </motion.div>
+                  ))}
                 </div>
                 {streamingAssistantMessage.citations.length > 0 && (
                   <div className="flex flex-wrap gap-1">
@@ -1089,7 +1410,7 @@ export default function Chat() {
               id="chat-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask anything..."
+              placeholder="Describe the issue. I will investigate and ask follow-ups only when needed..."
               className="pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
               autoComplete="off"
             />

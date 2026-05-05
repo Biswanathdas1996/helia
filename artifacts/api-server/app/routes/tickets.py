@@ -168,3 +168,24 @@ async def update_ticket(
         {"_id": tid}, {"$set": updates}, return_document=True
     )
     return serialize_ticket(r or existing)
+
+
+@router.delete("/tickets/{id}", status_code=204)
+async def delete_ticket(id: str, user: AuthedUser = Depends(require_auth)) -> None:
+    tid = _parse_id(id)
+    db = await get_db()
+    existing = await db.tickets.find_one({"_id": tid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    is_admin = user.role == "admin"
+    if not is_admin and existing.get("userId") != user.userId:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    await db.tickets.delete_one({"_id": tid})
+    await audit_log(
+        action="ticket.delete",
+        actor=user.email or user.userId,
+        target=str(existing.get("externalId") or tid),
+        meta={"ticketId": tid, "subject": existing.get("subject")},
+    )

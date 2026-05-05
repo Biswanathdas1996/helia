@@ -1836,3 +1836,81 @@ export const useUpdateTicket = <
 > => {
   return useMutation(getUpdateTicketMutationOptions(options));
 };
+
+export const getDeleteTicketUrl = (id: number) => {
+  return `/api/tickets/${id}`;
+};
+
+export const deleteTicket = async (
+  id: number,
+  options?: RequestInit,
+): Promise<void> => {
+  return customFetch<void>(getDeleteTicketUrl(id), {
+    ...options,
+    method: "DELETE",
+  });
+};
+
+export const getDeleteTicketMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteTicket>>,
+    TError,
+    { id: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof deleteTicket>>,
+  TError,
+  { id: number },
+  TContext
+> => {
+  const mutationKey = ["deleteTicket"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof deleteTicket>>,
+    { id: number }
+  > = (props) => {
+    const { id } = props ?? {};
+
+    return deleteTicket(id, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type DeleteTicketMutationResult = NonNullable<
+  Awaited<ReturnType<typeof deleteTicket>>
+>;
+
+export type DeleteTicketMutationError = ErrorType<unknown>;
+
+export const useDeleteTicket = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteTicket>>,
+    TError,
+    { id: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof deleteTicket>>,
+  TError,
+  { id: number },
+  TContext
+> => {
+  return useMutation(getDeleteTicketMutationOptions(options));
+};

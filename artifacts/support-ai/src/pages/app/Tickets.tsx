@@ -1,14 +1,47 @@
 import { Link, useLocation } from "wouter";
-import { useListTickets, getListTicketsQueryKey } from "@workspace/api-client-react";
+import { useListTickets, getListTicketsQueryKey, useDeleteTicket } from "@workspace/api-client-react";
 import { formatDistanceToNow } from "date-fns";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Plus, Ticket as TicketIcon } from "lucide-react";
+import { Plus, Ticket as TicketIcon, Trash2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { useQueryClient } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
+import { useState } from "react";
 
 export default function Tickets() {
   const { data: tickets, isLoading } = useListTickets();
   const [, setLocation] = useLocation();
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; subject: string } | null>(null);
+
+  const deleteTicket = useDeleteTicket({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getListTicketsQueryKey() });
+        setDeleteTarget(null);
+        toast({ title: "Ticket deleted" });
+      },
+      onError: () => {
+        toast({ title: "Failed to delete ticket", variant: "destructive" });
+      },
+    },
+  });
+
+  const confirmDelete = () => {
+    if (!deleteTarget) return;
+    deleteTicket.mutate({ id: deleteTarget.id });
+  };
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -30,6 +63,35 @@ export default function Tickets() {
 
   return (
     <div className="p-8 max-w-6xl mx-auto">
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this ticket?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget ? (
+                <>Ticket #{deleteTarget.id} ({deleteTarget.subject}) will be permanently deleted.</>
+              ) : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteTicket.isPending}>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deleteTicket.isPending}
+              onClick={confirmDelete}
+            >
+              Delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <div className="flex justify-between items-center mb-8">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Tickets</h1>
@@ -65,7 +127,7 @@ export default function Tickets() {
           {tickets?.map((ticket) => (
             <Card 
               key={ticket.id} 
-              className="cursor-pointer hover:border-primary/50 transition-colors"
+              className="group cursor-pointer hover:border-primary/50 transition-colors"
               onClick={() => setLocation(`/app/tickets/${ticket.id}`)}
             >
               <CardContent className="p-6 flex items-center justify-between">
@@ -92,6 +154,21 @@ export default function Tickets() {
                   <div className="text-xs text-muted-foreground text-right w-24">
                     {formatDistanceToNow(new Date(ticket.createdAt), { addSuffix: true })}
                   </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-destructive/80 hover:text-destructive hover:bg-destructive/10"
+                    title="Delete ticket"
+                    aria-label={`Delete ticket ${ticket.id}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDeleteTarget({ id: ticket.id, subject: ticket.subject });
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </div>
               </CardContent>
             </Card>
