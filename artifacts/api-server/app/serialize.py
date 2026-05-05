@@ -67,6 +67,7 @@ def serialize_message(m: dict[str, Any]) -> dict[str, Any]:
         "canAnswer": m.get("canAnswer"),
         "latencyMs": m.get("latencyMs"),
         "rating": m.get("rating"),
+        "rewrittenQuery": m.get("rewrittenQuery"),
         "createdAt": iso(m["createdAt"]),
     }
 

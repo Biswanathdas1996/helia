@@ -79,9 +79,17 @@ class RetrievalResult:
 
 
 async def retrieve(
-    db: AsyncIOMotorDatabase, query: str, *, tenant_id: str | None = None
+    db: AsyncIOMotorDatabase,
+    query: str,
+    *,
+    tenant_id: str | None = None,
+    pre_rewritten: str | None = None,
+    pre_intent: str | None = None,
 ) -> RetrievalResult:
-    rewritten, intent = await _rewrite_query(query)
+    if pre_rewritten:
+        rewritten, intent = pre_rewritten, (pre_intent or "general")
+    else:
+        rewritten, intent = await _rewrite_query(query)
     search_query = rewritten or query
 
     doc_query: dict[str, object] = {"status": "approved"}

@@ -190,8 +190,6 @@ export default function AdminDocumentDetail() {
   };
 
   const isPending = doc.status === "pending";
-  const cleanedMatchesOriginal = doc.cleanedText === doc.originalText;
-  const noTransformationsApplied = cleanedMatchesOriginal && doc.piiFindings.length === 0;
 
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-6">
@@ -377,162 +375,170 @@ export default function AdminDocumentDetail() {
         </CardContent>
       </Card>
 
-      <Tabs defaultValue="findings" className="w-full">
+      <Tabs defaultValue="pii" className="w-full">
         <TabsList className="mb-4">
-          <TabsTrigger value="findings">Review Findings</TabsTrigger>
-          <TabsTrigger value="content" className="gap-2">
-            Cleaned Content
-            {noTransformationsApplied ? (
-              <Badge variant="outline" className="text-[10px] font-normal">Unchanged</Badge>
-            ) : null}
-          </TabsTrigger>
-          <TabsTrigger value="original">Original Content</TabsTrigger>
+          <TabsTrigger value="pii">PII Findings</TabsTrigger>
+          <TabsTrigger value="duplicates">Potential Duplicate Content</TabsTrigger>
         </TabsList>
         
-        <TabsContent value="findings" className="space-y-6">
-          <div className="grid md:grid-cols-2 gap-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2 text-purple-700 dark:text-purple-400">
-                  <Search className="h-4 w-4" /> PII Findings ({doc.piiFindings.length})
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {doc.piiFindings.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No PII detected in this document.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {doc.piiFindings.map((finding, i) => (
-                      <div key={i} className="text-sm border-b pb-3 last:border-0 last:pb-0">
-                        <div className="flex justify-between items-center mb-1">
-                          <div className="flex items-center gap-2">
-                            <Badge variant="outline" className="text-[10px] bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/20 dark:text-purple-400">{finding.type}</Badge>
-                            {finding.detector && (
-                              <Badge variant="secondary" className="text-[10px] font-normal">{finding.detector}</Badge>
-                            )}
-                          </div>
-                          <span className="text-muted-foreground">→ replaced with <code className="bg-muted px-1 rounded">{finding.replacement}</code></span>
-                        </div>
-                        {formatConfidence(finding.confidence) && (
-                          <p className="text-[11px] text-muted-foreground">{formatConfidence(finding.confidence)}</p>
-                        )}
-                        <p className="font-mono text-xs bg-muted p-2 rounded mt-2">{finding.value}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2 text-orange-700 dark:text-orange-400">
-                  <File className="h-4 w-4" /> {doc.status === "pending" ? "Potential Duplicate Content" : "Duplicate Chunks"} ({doc.duplicateFindings.length})
-                </CardTitle>
-                <CardDescription>
-                  {doc.status === "pending"
-                    ? "Potential duplicates are auto-removed on approval; you can manually exclude them now."
-                    : "Manually remove duplicate chunks when needed."}
-                </CardDescription>
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {dedupMethodLabel && (
-                    <Badge variant="outline" className="text-[10px]">Method: {dedupMethodLabel}</Badge>
-                  )}
-                  {typeof dedupDebug?.thresholds.jaccard === "number" && (
-                    <Badge variant="outline" className="text-[10px]">Jaccard ≥ {(dedupDebug.thresholds.jaccard * 100).toFixed(0)}%</Badge>
-                  )}
-                  {typeof dedupDebug?.thresholds.cosine === "number" && (
-                    <Badge variant="outline" className="text-[10px]">Cosine ≥ {(dedupDebug.thresholds.cosine * 100).toFixed(0)}%</Badge>
-                  )}
-                  {dedupDebug && (
-                    <Badge variant="outline" className="text-[10px]">
-                      {dedupDebug.vectorSearchEnabled ? "Vector search on" : "Vector search off"}
-                    </Badge>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent>
-                {doc.duplicateFindings.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    {doc.status === "pending"
-                      ? "No overlap detected above preview threshold."
-                      : "No duplicate content detected."}
-                  </p>
-                ) : (
-                  <div className="space-y-4">
-                    {doc.duplicateFindings.map((finding, i) => (
-                      <div key={i} className="text-sm border-b pb-4 last:border-0 last:pb-0">
-                        <div className="flex justify-between items-center mb-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-xs bg-orange-100 text-orange-800 px-2 py-0.5 rounded dark:bg-orange-900/30 dark:text-orange-400">
-                              {Math.round(finding.similarity * 100)}% match
-                            </span>
-                            {finding.method && (
-                              <Badge variant="secondary" className="text-[10px] font-normal">{finding.method}</Badge>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground text-xs">
-                              {typeof finding.matchedDocumentId === "number"
-                                ? `with Document #${finding.matchedDocumentId}`
-                                : "within this document"}
-                            </span>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 px-2 text-xs"
-                              disabled={
-                                excludeDuplicate.isPending ||
-                                activeSourcePosition === finding.sourceChunkPosition ||
-                                typeof finding.sourceChunkPosition !== "number"
-                              }
-                              onClick={() => handleExcludeDuplicateChunk(finding.sourceChunkPosition)}
-                            >
-                              {excludeDuplicate.isPending && activeSourcePosition === finding.sourceChunkPosition
-                                ? "Removing..."
-                                : doc.status === "pending"
-                                  ? "Exclude Chunk"
-                                  : "Delete Chunk"}
-                            </Button>
-                          </div>
-                        </div>
-                        <p className="italic text-muted-foreground leading-relaxed bg-muted p-2 rounded whitespace-pre-wrap break-words">"{finding.snippet}"</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="content">
+        <TabsContent value="pii">
           <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2 text-purple-700 dark:text-purple-400">
+                <Search className="h-4 w-4" /> PII Findings ({doc.piiFindings.length})
+              </CardTitle>
+            </CardHeader>
             <CardContent className="p-6">
-              {noTransformationsApplied ? (
-                <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
-                  <div className="flex items-center gap-2 font-medium">
-                    <AlertTriangle className="h-4 w-4" />
-                    No redactions or content cleanup were applied.
-                  </div>
-                  <p className="mt-1 text-xs opacity-90">
-                    This document had no detected PII, so cleaned content is identical to the original text.
-                  </p>
+              {doc.piiFindings.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No PII detected in this document.</p>
+              ) : (
+                <div className="space-y-3">
+                  {doc.piiFindings.map((finding, i) => (
+                    <div key={i} className="text-sm border-b pb-3 last:border-0 last:pb-0">
+                      <div className="flex justify-between items-center mb-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className="text-[10px] bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/20 dark:text-purple-400">{finding.type}</Badge>
+                          {finding.detector && (
+                            <Badge variant="secondary" className="text-[10px] font-normal">{finding.detector}</Badge>
+                          )}
+                        </div>
+                        <span className="text-muted-foreground">→ replaced with <code className="bg-muted px-1 rounded">{finding.replacement}</code></span>
+                      </div>
+                      {formatConfidence(finding.confidence) && (
+                        <p className="text-[11px] text-muted-foreground">{formatConfidence(finding.confidence)}</p>
+                      )}
+                      <p className="font-mono text-xs bg-muted p-2 rounded mt-2">{finding.value}</p>
+                    </div>
+                  ))}
                 </div>
-              ) : null}
-              <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-foreground bg-muted/30 p-6 rounded-lg overflow-x-auto">
-                {doc.cleanedText}
-              </pre>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
 
-        <TabsContent value="original">
+        <TabsContent value="duplicates">
           <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2 text-orange-700 dark:text-orange-400">
+                <File className="h-4 w-4" /> Potential Duplicate Content ({doc.duplicateFindings.length})
+              </CardTitle>
+              <CardDescription>
+                {doc.status === "pending"
+                  ? "Potential duplicates are auto-removed on approval; you can manually exclude them now."
+                  : "Manually remove duplicate chunks when needed."}
+              </CardDescription>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {dedupMethodLabel && (
+                  <Badge variant="outline" className="text-[10px]">Method: {dedupMethodLabel}</Badge>
+                )}
+                {typeof dedupDebug?.thresholds.jaccard === "number" && (
+                  <Badge variant="outline" className="text-[10px]">Jaccard ≥ {(dedupDebug.thresholds.jaccard * 100).toFixed(0)}%</Badge>
+                )}
+                {typeof dedupDebug?.thresholds.cosine === "number" && (
+                  <Badge variant="outline" className="text-[10px]">Cosine ≥ {(dedupDebug.thresholds.cosine * 100).toFixed(0)}%</Badge>
+                )}
+                {dedupDebug && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {dedupDebug.vectorSearchEnabled ? "Vector search on" : "Vector search off"}
+                  </Badge>
+                )}
+              </div>
+            </CardHeader>
             <CardContent className="p-6">
-              <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-muted-foreground bg-muted/10 p-6 rounded-lg overflow-x-auto opacity-70">
-                {doc.originalText}
-              </pre>
+              {doc.duplicateFindings.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {doc.status === "pending"
+                    ? "No overlap detected above preview threshold."
+                    : "No duplicate content detected."}
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {doc.duplicateFindings.map((finding, i) => {
+                    const findingExtra = finding as unknown as Record<string, unknown>;
+                    const matchedChunkPosition = typeof findingExtra.matchedChunkPosition === "number"
+                      ? findingExtra.matchedChunkPosition
+                      : null;
+                    const matchedSnippet = typeof findingExtra.matchedSnippet === "string"
+                      ? findingExtra.matchedSnippet
+                      : null;
+
+                    const dupReason = finding.method === "hash"
+                      ? "Exact duplicate — these chunks share identical content (same hash)."
+                      : finding.method === "embedding"
+                        ? `Semantically near-identical — vector similarity is ${Math.round(finding.similarity * 100)}%, meaning the chunks convey the same meaning even if worded differently.`
+                        : finding.method === "jaccard"
+                          ? `High term overlap — ${Math.round(finding.similarity * 100)}% of words are shared between these chunks.`
+                          : `Content similarity of ${Math.round(finding.similarity * 100)}% exceeds the deduplication threshold.`;
+
+                    const matchedLabel = typeof finding.matchedDocumentId === "number"
+                      ? `Matched chunk in "${finding.matchedDocumentName ?? `Document #${finding.matchedDocumentId}`}"${typeof matchedChunkPosition === "number" ? ` · position #${matchedChunkPosition}` : ""}`
+                      : `Same document · position #${matchedChunkPosition ?? "?"}`;
+
+                    return (
+                    <div key={i} className="text-sm border rounded-md p-3 last:mb-0">
+                      <div className="flex justify-between items-center mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-xs bg-orange-100 text-orange-800 px-2 py-0.5 rounded dark:bg-orange-900/30 dark:text-orange-400">
+                            {Math.round(finding.similarity * 100)}% match
+                          </span>
+                          {finding.method && (
+                            <Badge variant="secondary" className="text-[10px] font-normal">{finding.method}</Badge>
+                          )}
+                          <span className="text-muted-foreground text-xs">
+                            {typeof finding.matchedDocumentId === "number"
+                              ? `vs Document #${finding.matchedDocumentId}${finding.matchedDocumentName ? ` — ${finding.matchedDocumentName}` : ""}`
+                              : "within this document"}
+                          </span>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          disabled={
+                            excludeDuplicate.isPending ||
+                            activeSourcePosition === finding.sourceChunkPosition ||
+                            typeof finding.sourceChunkPosition !== "number"
+                          }
+                          onClick={() => handleExcludeDuplicateChunk(finding.sourceChunkPosition)}
+                        >
+                          {excludeDuplicate.isPending && activeSourcePosition === finding.sourceChunkPosition
+                            ? "Removing..."
+                            : doc.status === "pending"
+                              ? "Exclude Chunk"
+                              : "Delete Chunk"}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground bg-muted/50 rounded px-2 py-1 mb-3 border-l-2 border-orange-300 dark:border-orange-700">
+                        {dupReason}
+                      </p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                            Incoming chunk{typeof finding.sourceChunkPosition === "number" ? ` · position #${finding.sourceChunkPosition}` : ""}
+                          </p>
+                          <p className="italic text-muted-foreground leading-relaxed bg-orange-50 dark:bg-orange-950/20 border border-orange-200 dark:border-orange-900/40 p-2 rounded whitespace-pre-wrap break-words">"{finding.snippet}"</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                            {matchedLabel}
+                          </p>
+                          {matchedSnippet
+                            ? <p className="italic text-muted-foreground leading-relaxed bg-muted border p-2 rounded whitespace-pre-wrap break-words">"{matchedSnippet}"</p>
+                            : (
+                              <p className="text-xs text-muted-foreground italic bg-muted/50 border border-dashed p-2 rounded">
+                                {typeof matchedChunkPosition === "number"
+                                  ? `Matched chunk at position #${matchedChunkPosition}${typeof finding.matchedDocumentId === "number" ? ` in Document #${finding.matchedDocumentId}` : " within this document"} — re-upload or re-approve to load preview.`
+                                  : "Matched chunk content unavailable — re-upload or re-approve to load preview."}
+                              </p>
+                            )
+                          }
+                        </div>
+                      </div>
+                    </div>
+                  );
+                  })}
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

@@ -163,7 +163,7 @@ async def _hash_match_existing(
         query["tenantId"] = tenant_id
     cursor = db.chunks.find(
         query,
-        {"_id": 1, "documentId": 1, "chunkHash": 1},
+        {"_id": 1, "documentId": 1, "chunkHash": 1, "content": 1, "position": 1},
     )
     existing_by_hash: dict[str, dict] = {}
     async for ec in cursor:
@@ -185,6 +185,8 @@ async def _hash_match_existing(
             "matchedDocumentId": ec["documentId"],
             "matchedDocumentName": doc_name_by_id.get(ec["documentId"]),
             "matchedChunkId": ec["_id"],
+            "matchedSnippet": ec.get("content"),
+            "matchedChunkPosition": ec.get("position"),
             "sourceChunkPosition": i,
         }
     return matches
@@ -309,6 +311,8 @@ async def _build_ingestion_plan(
                 "matchedDocumentId": row["documentId"],
                 "matchedDocumentName": doc_name_by_id.get(row["documentId"]),
                 "matchedChunkId": row["_id"],
+                "matchedSnippet": row.get("content"),
+                "matchedChunkPosition": row.get("position"),
                 "sourceChunkPosition": i,
             }
 
@@ -341,6 +345,8 @@ async def _build_ingestion_plan(
                 "documentId": c["documentId"],
                 "set": set(tokenize(existing_content)),
                 "embedding": c.get("embedding"),
+                "content": str(c.get("content") or ""),
+                "position": c.get("position"),
             })
         method_label_external = "hash+embedding+jaccard" if use_embeddings else "hash+jaccard"
 
@@ -361,6 +367,8 @@ async def _build_ingestion_plan(
                     "matchedDocumentId": e["documentId"],
                     "matchedDocumentName": doc_name_by_id.get(e["documentId"]),
                     "matchedChunkId": e["id"],
+                    "matchedSnippet": e.get("content"),
+                    "matchedChunkPosition": e.get("position"),
                     "sourceChunkPosition": i,
                 }
         return None
@@ -376,6 +384,8 @@ async def _build_ingestion_plan(
                     "matchedDocumentId": e["documentId"],
                     "matchedDocumentName": doc_name_by_id.get(e["documentId"]),
                     "matchedChunkId": e["id"],
+                    "matchedSnippet": e.get("content"),
+                    "matchedChunkPosition": e.get("position"),
                     "sourceChunkPosition": i,
                 }
         return None
@@ -400,9 +410,10 @@ async def _build_ingestion_plan(
                     "matchedDocumentId": None,
                     "matchedDocumentName": "(within this document)",
                     "matchedChunkId": None,
+                    "matchedSnippet": raw_chunks[k],
+                    "matchedChunkPosition": k,
                     "sourceChunkPosition": i,
                 })
-                break
         if is_dup:
             continue
 

@@ -16,6 +16,10 @@ export interface DuplicateFinding {
   matchedDocumentName?: string | null;
   /** @nullable */
   matchedChunkId?: number | null;
+  /** @nullable */
+  matchedSnippet?: string | null;
+  /** @nullable */
+  matchedChunkPosition?: number | null;
   /** @minimum 0 */
   sourceChunkPosition?: number;
 }

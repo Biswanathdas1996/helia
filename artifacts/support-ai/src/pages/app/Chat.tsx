@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "wouter";
-import { 
-  useListConversations, 
-  useGetConversation, 
-  useSendMessage, 
+import {
+  useListConversations,
+  useGetConversation,
   useCreateConversation,
   useListTickets,
   useRateMessage,
@@ -12,8 +11,29 @@ import {
 } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { Bot, FileText, Send, ThumbsDown, ThumbsUp, Ticket, AlertCircle, Loader2, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Share2 } from "lucide-react";
+import {
+  Bot,
+  FileText,
+  Send,
+  ThumbsDown,
+  ThumbsUp,
+  Ticket,
+  AlertCircle,
+  Loader2,
+  MessageSquare,
+  MessageSquarePlus,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Share2,
+  CheckCircle2,
+  CircleDashed,
+  AlertTriangle,
+  History,
+  ChevronRight
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -245,6 +265,83 @@ function renderAssistantContent(content: string): React.ReactNode {
   );
 }
 
+type StreamingMessage = {
+  id: number;
+  conversationId: number;
+  role: "user" | "assistant";
+  content: string;
+  citations: ChatCitation[];
+  rating?: "up" | "down" | null;
+  canAnswer?: boolean | null;
+  createdAt: string;
+};
+
+type ChatCitation = {
+  chunkId: number;
+  documentId: number;
+  documentName: string;
+  snippet: string;
+  score: number;
+  metadata?: {
+    fileName?: string;
+    pageNumber?: number | null;
+    keyPhrases?: string[];
+    chunkPosition?: number | null;
+    tokenCount?: number | null;
+    sourceType?: string | null;
+  };
+};
+
+type StreamingAssistantMessage = StreamingMessage & {
+  role: "assistant";
+  citations: ChatCitation[];
+  done: boolean;
+};
+
+type ProcessStepStatus = "started" | "completed" | "error";
+
+type ProcessStep = {
+  name: string;
+  status: ProcessStepStatus;
+};
+
+type SseEvent = { event: string; data: string };
+
+async function* iterSseEvents(
+  response: Response,
+  signal?: AbortSignal,
+): AsyncGenerator<SseEvent> {
+  if (!response.body) return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  try {
+    while (true) {
+      if (signal?.aborted) return;
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, "\n");
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        let event = "message";
+        const dataLines: string[] = [];
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (dataLines.length > 0) {
+          yield { event, data: dataLines.join("\n") };
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export default function Chat() {
   const [location, setLocation] = useLocation();
   const params = useParams<{ id?: string }>();
@@ -259,7 +356,6 @@ export default function Chat() {
   });
 
   const createConvo = useCreateConversation();
-  const sendMessage = useSendMessage();
   const rateMessage = useRateMessage();
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -267,7 +363,12 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [isConversationsOpen, setIsConversationsOpen] = useState(true);
   const [memoryGraphOpen, setMemoryGraphOpen] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingUserMessage, setStreamingUserMessage] = useState<StreamingMessage | null>(null);
+  const [streamingAssistantMessage, setStreamingAssistantMessage] = useState<StreamingAssistantMessage | null>(null);
+  const [processSteps, setProcessSteps] = useState<ProcessStep[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const memoryGraph = useQuery<MemoryGraphResponse>({
     queryKey: ["chat-memory-graph", currentId],
@@ -293,11 +394,140 @@ export default function Chat() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [activeConvo?.messages, sendMessage.isPending]);
+  }, [activeConvo?.messages, isStreaming, streamingAssistantMessage?.content, processSteps]);
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  const streamMessage = useCallback(
+    async (convoId: number, content: string) => {
+      const controller = new AbortController();
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = controller;
+
+      setIsStreaming(true);
+      setStreamingUserMessage(null);
+      setStreamingAssistantMessage(null);
+      setProcessSteps([]);
+
+      try {
+        const response = await fetch(
+          `/api/chat/conversations/${convoId}/messages/stream`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+            body: JSON.stringify({ content }),
+            signal: controller.signal,
+          },
+        );
+
+        if (!response.ok || !response.body) {
+          throw new Error(`Stream request failed: ${response.status}`);
+        }
+
+        let assistantAccum = "";
+        let assistantCitations: StreamingAssistantMessage["citations"] = [];
+
+        for await (const evt of iterSseEvents(response, controller.signal)) {
+          let payload: unknown;
+          try {
+            payload = JSON.parse(evt.data);
+          } catch {
+            continue;
+          }
+
+          if (evt.event === "user") {
+            setStreamingUserMessage(payload as StreamingMessage);
+          } else if (evt.event === "citations") {
+            assistantCitations = (payload as StreamingAssistantMessage["citations"]) ?? [];
+            setStreamingAssistantMessage((prev) => ({
+              id: prev?.id ?? -1,
+              conversationId: convoId,
+              role: "assistant",
+              content: prev?.content ?? "",
+              citations: assistantCitations,
+              createdAt: prev?.createdAt ?? new Date().toISOString(),
+              canAnswer: null,
+              done: false,
+            }));
+          } else if (evt.event === "token") {
+            const delta = (payload as { delta?: string }).delta ?? "";
+            assistantAccum += delta;
+            const snapshot = assistantAccum;
+            setStreamingAssistantMessage((prev) => ({
+              id: prev?.id ?? -1,
+              conversationId: convoId,
+              role: "assistant",
+              content: snapshot,
+              citations: prev?.citations ?? assistantCitations,
+              createdAt: prev?.createdAt ?? new Date().toISOString(),
+              canAnswer: null,
+              done: false,
+            }));
+          } else if (evt.event === "process") {
+            const step = payload as { name?: string; status?: ProcessStepStatus };
+            const name = typeof step.name === "string" ? step.name.trim() : "";
+            if (!name) continue;
+            const status: ProcessStepStatus =
+              step.status === "completed" || step.status === "error" ? step.status : "started";
+            setProcessSteps((prev) => {
+              const existing = prev.findIndex((s) => s.name === name);
+              if (existing === -1) {
+                return [...prev, { name, status }];
+              }
+              const next = [...prev];
+              next[existing] = { name, status };
+              return next;
+            });
+          } else if (evt.event === "done") {
+            const final = payload as StreamingMessage & {
+              citations?: StreamingAssistantMessage["citations"];
+              canAnswer?: boolean | null;
+            };
+            setStreamingAssistantMessage({
+              ...final,
+              role: "assistant",
+              citations: final.citations ?? assistantCitations,
+              done: true,
+            });
+            setProcessSteps((prev) => {
+              const existing = prev.findIndex((s) => s.name === "Completed");
+              if (existing === -1) {
+                return [...prev, { name: "Completed", status: "completed" }];
+              }
+              const next = [...prev];
+              next[existing] = { name: "Completed", status: "completed" };
+              return next;
+            });
+          }
+        }
+
+        await queryClient.invalidateQueries({ queryKey: getGetConversationQueryKey(convoId) });
+        await queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+      } catch (err) {
+        if ((err as { name?: string })?.name === "AbortError") return;
+        setProcessSteps((prev) => [...prev, { name: "Streaming failed", status: "error" }]);
+        toast({ title: "Failed to send message", variant: "destructive" });
+      } finally {
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
+        }
+        setIsStreaming(false);
+        setStreamingUserMessage(null);
+        setStreamingAssistantMessage(null);
+        setProcessSteps([]);
+      }
+    },
+    [queryClient, toast],
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || sendMessage.isPending) return;
+    if (!input.trim() || isStreaming) return;
 
     const content = input;
     setInput("");
@@ -315,14 +545,7 @@ export default function Chat() {
       }
     }
 
-    try {
-      // Optimistic update could go here
-      await sendMessage.mutateAsync({ id: convoId, data: { content } });
-      queryClient.invalidateQueries({ queryKey: getGetConversationQueryKey(convoId) });
-      queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
-    } catch (err) {
-      toast({ title: "Failed to send message", variant: "destructive" });
-    }
+    await streamMessage(convoId, content);
   };
 
   const handleRate = async (messageId: number, rating: "up" | "down") => {
@@ -343,33 +566,42 @@ export default function Chat() {
           isConversationsOpen ? "w-80" : "w-0 border-r-0"
         }`}
       >
-        <div className="w-80 h-full flex flex-col">
-          <div className="p-4 border-b border-border">
+        <div className="w-80 h-full flex flex-col bg-gradient-to-b from-muted/40 via-muted/25 to-background">
+          <div className="p-3 border-b border-border/80">
             <Button
-              className="w-full justify-start text-left font-medium"
-              variant={!currentId ? "secondary" : "outline"}
+              className={cn(
+                "w-full justify-start gap-2 rounded-xl h-11 font-medium shadow-sm",
+                currentId
+                  ? "border border-border/60 bg-background hover:bg-background/90"
+                  : null
+              )}
+              variant={!currentId ? "default" : "outline"}
               onClick={() => setLocation("/app")}
             >
-              <MessageSquarePlus className="mr-2 h-4 w-4" />
-              New Conversation
+              <MessageSquarePlus className="h-4 w-4 shrink-0" />
+              New conversation
             </Button>
           </div>
 
           {activeTickets.length > 0 && (
-            <div className="px-4 py-3 border-b border-border bg-primary/5">
-              <h3 className="text-xs font-semibold text-primary uppercase tracking-wider mb-2 flex items-center">
-                <AlertCircle className="h-3 w-3 mr-1" /> Open Tickets ({activeTickets.length})
+            <div className="mx-3 mt-3 mb-1 rounded-xl border border-primary/15 bg-primary/[0.06] px-3 py-2.5">
+              <h3 className="text-[11px] font-semibold text-primary uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                Open tickets
+                <span className="ml-auto rounded-full bg-primary/15 px-1.5 py-0 text-[10px] tabular-nums font-bold">
+                  {activeTickets.length}
+                </span>
               </h3>
-              <div className="space-y-1">
-                {activeTickets.slice(0, 3).map(ticket => (
+              <div className="flex flex-col gap-0.5">
+                {activeTickets.slice(0, 3).map((ticket) => (
                   <Button
                     key={ticket.id}
-                    variant="link"
-                    className="w-full justify-start px-2 py-1 h-auto text-xs text-foreground/80 hover:text-foreground"
+                    variant="ghost"
+                    className="w-full justify-start gap-2 h-8 px-2 rounded-lg text-xs text-foreground/85 hover:bg-background/80 hover:text-foreground"
                     onClick={() => setLocation(`/app/tickets/${ticket.id}`)}
                   >
-                    <Ticket className="h-3 w-3 mr-2 text-muted-foreground" />
-                    <span className="truncate">{ticket.subject}</span>
+                    <Ticket className="h-3 w-3 shrink-0 text-primary/70" />
+                    <span className="truncate font-medium">{ticket.subject}</span>
                   </Button>
                 ))}
               </div>
@@ -377,27 +609,124 @@ export default function Chat() {
           )}
 
           <ScrollArea className="flex-1">
-            <div className="p-2 space-y-1">
+            <div className="flex flex-col gap-3 px-3 py-4">
+              <div className="flex items-center gap-2.5 rounded-2xl border border-border/50 bg-muted/30 px-3 py-2.5 backdrop-blur-sm">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-background/70 shadow-sm ring-1 ring-border/40">
+                  <History className="h-4 w-4 text-muted-foreground" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                    Recent
+                  </span>
+                  <p className="truncate text-[10px] text-muted-foreground/75">Pick up where you left off</p>
+                </div>
+                {!loadingConvos && conversations && conversations.length > 0 ? (
+                  <span className="shrink-0 rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-semibold tabular-nums text-foreground shadow-sm ring-1 ring-border/45">
+                    {conversations.length}
+                  </span>
+                ) : null}
+              </div>
+
               {loadingConvos ? (
-                <div className="p-4 text-center text-sm text-muted-foreground">Loading...</div>
-              ) : conversations?.length === 0 ? (
-                <div className="p-4 text-center text-sm text-muted-foreground">No conversations yet</div>
-              ) : (
-                conversations?.map(convo => (
-                  <Button
-                    key={convo.id}
-                    variant={currentId === convo.id ? "secondary" : "ghost"}
-                    className="w-full justify-start text-left h-auto py-3 px-3"
-                    onClick={() => setLocation(`/app/conversations/${convo.id}`)}
-                  >
-                    <div className="flex flex-col items-start gap-1 overflow-hidden w-full">
-                      <span className="font-medium text-sm truncate w-full">{convo.title || "New Conversation"}</span>
-                      {convo.lastMessagePreview && (
-                        <span className="text-xs text-muted-foreground truncate w-full">{convo.lastMessagePreview}</span>
-                      )}
+                <div className="flex flex-col gap-2">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="rounded-2xl border border-border/40 bg-background/50 p-3 space-y-2 shadow-[0_2px_8px_-4px_rgba(15,23,42,0.12)] dark:shadow-none"
+                    >
+                      <div className="flex gap-2.5">
+                        <Skeleton className="h-9 w-9 shrink-0 rounded-xl" />
+                        <div className="flex-1 space-y-1.5 pt-0.5">
+                          <Skeleton className="h-3 w-[82%] rounded-md" />
+                          <Skeleton className="h-2.5 w-full rounded-md" />
+                        </div>
+                      </div>
                     </div>
-                  </Button>
-                ))
+                  ))}
+                </div>
+              ) : conversations?.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-border/65 bg-muted/15 px-4 py-9 text-center">
+                  <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-muted/70 to-muted/40 shadow-inner ring-1 ring-border/30">
+                    <MessageSquare className="h-5 w-5 text-muted-foreground" />
+                  </div>
+                  <p className="text-sm font-semibold text-foreground">No conversations yet</p>
+                  <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed px-1">
+                    Start a new thread — your history will show up here.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {conversations?.map((convo) => {
+                    const active = currentId === convo.id;
+                    let timeLabel = "";
+                    try {
+                      timeLabel = formatDistanceToNow(new Date(convo.updatedAt), { addSuffix: true });
+                    } catch {
+                      timeLabel = "";
+                    }
+                    return (
+                      <Button
+                        key={convo.id}
+                        variant="ghost"
+                        className={cn(
+                          "group relative w-full min-w-0 max-w-full justify-start overflow-hidden text-left h-auto min-h-0",
+                          "p-0 rounded-2xl border font-normal whitespace-normal shadow-sm",
+                          "transition-[transform,background-color,border-color,box-shadow] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                          active
+                            ? "border-border/80 bg-background shadow-[0_4px_20px_-10px_rgba(15,23,42,0.18)] ring-1 ring-primary/15 dark:shadow-none"
+                            : "border-border/35 bg-muted/20 hover:bg-muted/40 hover:border-border/55 hover:shadow-[0_2px_12px_-6px_rgba(15,23,42,0.14)] dark:hover:shadow-none"
+                        )}
+                        onClick={() => setLocation(`/app/conversations/${convo.id}`)}
+                      >
+                        <div className="flex min-w-0 w-full gap-2.5 overflow-hidden px-3 py-2.5">
+                          <div
+                            className={cn(
+                              "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-sm ring-1 transition-colors duration-200",
+                              active
+                                ? "bg-primary/15 text-primary ring-primary/20"
+                                : "bg-muted/80 text-muted-foreground ring-border/35 group-hover:bg-muted group-hover:text-foreground/80"
+                            )}
+                          >
+                            <MessageSquare className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1 flex flex-col gap-1 pt-0.5">
+                            <div className="flex min-w-0 w-full items-start justify-between gap-2">
+                              <span
+                                className={cn(
+                                  "min-w-0 flex-1 text-[13px] font-semibold leading-snug tracking-tight line-clamp-1",
+                                  active ? "text-foreground" : "text-foreground/92"
+                                )}
+                              >
+                                {convo.title || "New conversation"}
+                              </span>
+                              <div className="flex shrink-0 items-center gap-0.5">
+                                {timeLabel ? (
+                                  <span className="text-[10px] font-medium tabular-nums text-muted-foreground max-w-[5.75rem] truncate pt-px">
+                                    {timeLabel}
+                                  </span>
+                                ) : null}
+                                <ChevronRight
+                                  className={cn(
+                                    "h-4 w-4 shrink-0 text-muted-foreground/40 transition-opacity duration-200",
+                                    active ? "opacity-70" : "opacity-0 group-hover:opacity-60"
+                                  )}
+                                  aria-hidden
+                                />
+                              </div>
+                            </div>
+                            {convo.lastMessagePreview ? (
+                              <p className="text-[11px] leading-snug text-muted-foreground line-clamp-2">
+                                {convo.lastMessagePreview}
+                              </p>
+                            ) : (
+                              <p className="text-[11px] text-muted-foreground/65 italic leading-snug">No preview yet</p>
+                            )}
+                          </div>
+                        </div>
+                      </Button>
+                    );
+                  })}
+                </div>
               )}
             </div>
           </ScrollArea>
@@ -495,13 +824,23 @@ export default function Chat() {
               )}
               
               <div className={`flex flex-col gap-2 max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                <div className={`p-4 rounded-2xl text-sm ${
-                  msg.role === 'user' 
-                    ? 'bg-primary text-primary-foreground rounded-tr-sm' 
-                    : 'bg-card border border-border/80 shadow-sm text-foreground rounded-tl-sm'
-                }`}>
+                <div className={
+                  msg.role === 'user'
+                    ? 'px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm'
+                    : 'w-full px-5 py-4 rounded-2xl rounded-tl-sm text-sm bg-card border border-border/60 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_12px_rgba(15,23,42,0.04)] text-foreground'
+                }>
                   {msg.role === 'assistant' ? (
-                    renderAssistantContent(msg.content)
+                    <>
+                      {renderAssistantContent(msg.content)}
+                      {(msg as { rewrittenQuery?: string | null }).rewrittenQuery && (
+                        <div className="mt-4 pt-3 border-t border-border/50">
+                          <p className="text-[11px] leading-snug text-muted-foreground/80">
+                            <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Rewritten query</span>
+                            <span className="italic">{(msg as { rewrittenQuery?: string | null }).rewrittenQuery}</span>
+                          </p>
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
                   )}
@@ -586,7 +925,68 @@ export default function Chat() {
             </div>
           ))}
 
-          {sendMessage.isPending && (
+          {streamingUserMessage && (
+            <div className="flex gap-4 max-w-4xl mx-auto justify-end">
+              <div className="flex flex-col gap-2 max-w-[80%] items-end">
+                <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
+                  <div className="whitespace-pre-wrap leading-relaxed">{streamingUserMessage.content}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {streamingAssistantMessage && streamingAssistantMessage.content.length > 0 && (
+            <div className="flex gap-4 max-w-4xl mx-auto justify-start">
+              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
+                <Bot className="h-4 w-4 text-primary" />
+              </div>
+              <div className="flex flex-col gap-2 max-w-[80%] items-start">
+                <div className="w-full px-5 py-4 rounded-2xl rounded-tl-sm text-sm bg-card border border-border/60 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_12px_rgba(15,23,42,0.04)] text-foreground">
+                  {renderAssistantContent(streamingAssistantMessage.content)}
+                  <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse rounded-sm" />
+                </div>
+                {streamingAssistantMessage.citations.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {streamingAssistantMessage.citations.map((cite, idx) => (
+                      <Badge
+                        key={`stream-cite-${idx}`}
+                        variant="outline"
+                        className="text-xs py-0 h-6 font-normal text-muted-foreground border-border/70 bg-background/80"
+                      >
+                        [{idx + 1}] {cite.documentName}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {isStreaming && processSteps.length > 0 && (
+            <div className="max-w-4xl mx-auto">
+              <div className="rounded-xl border border-border/70 bg-muted/30 px-4 py-3">
+                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-2">
+                  Processing steps
+                </div>
+                <div className="space-y-1.5">
+                  {processSteps.map((step, idx) => (
+                    <div key={`${step.name}-${idx}`} className="flex items-center gap-2 text-sm text-foreground/85">
+                      {step.status === "completed" ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                      ) : step.status === "error" ? (
+                        <AlertTriangle className="h-4 w-4 text-destructive" />
+                      ) : (
+                        <CircleDashed className="h-4 w-4 text-primary animate-spin" />
+                      )}
+                      <span>{step.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isStreaming && (!streamingAssistantMessage || streamingAssistantMessage.content.length === 0) && (
             <div className="flex gap-4 max-w-4xl mx-auto justify-start">
               <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
                 <Bot className="h-4 w-4 text-primary" />
@@ -613,7 +1013,7 @@ export default function Chat() {
             <Button 
               type="submit" 
               size="icon" 
-              disabled={!input.trim() || sendMessage.isPending}
+              disabled={!input.trim() || isStreaming || createConvo.isPending}
               className="absolute right-2 h-10 w-10 rounded-lg"
             >
               <Send className="h-4 w-4" />

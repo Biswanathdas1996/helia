@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,16 @@ log = logging.getLogger("api-server.chat")
 
 _RETRIEVAL_CACHE_TTL = 300
 _MEMORY_GRAPH_QUERY_FALLBACK = "user preferences profile support history"
+_TICKET_INTENT_PATTERNS = [
+    re.compile(r"\b(create|raise|open|file|submit|log|start)\s+(a\s+|an\s+|the\s+|new\s+)*(support\s+)?ticket\b", re.IGNORECASE),
+    re.compile(r"\bnew\s+ticket\b", re.IGNORECASE),
+    re.compile(r"\bescalate\b.*\b(ticket|human|agent|support)\b", re.IGNORECASE),
+    re.compile(r"\b(want|need|like)\s+to\s+(create|open|raise|file|submit)\s+(a\s+|an\s+|the\s+|new\s+)*(support\s+)?ticket\b", re.IGNORECASE),
+]
+_TICKET_INTENT_RESPONSE = (
+    "Of course — I can help you open a support ticket so a human teammate can follow up. "
+    "Tap the **Create Ticket** button below and I'll prefill what we've discussed so far."
+)
 _UNANSWERABLE_PATTERNS = [
     "do not contain information",
     "cannot answer",
@@ -214,7 +225,21 @@ async def send_message(
     user_msg = await _persist_user_message(db, cid, body.content)
     await _bump_conversation_title(db, c, body.content)
 
-    retrieval = await _cached_retrieve(db, body.content, tenant_id=tenant_for(user))
+    if _detect_ticket_intent(body.content):
+        assistant_msg = await _persist_ticket_intent_reply(db, cid, started)
+        return {
+            "userMessage": serialize_message(user_msg),
+            "assistantMessage": serialize_message(assistant_msg),
+        }
+
+    enhanced_query, enhanced_intent = await _enhance_query(db, cid, body.content)
+    retrieval = await _cached_retrieve(
+        db,
+        body.content,
+        tenant_id=tenant_for(user),
+        rewritten=enhanced_query,
+        intent=enhanced_intent,
+    )
     memory_snippets = await agent_memory.search_user_memory(user.userId, body.content)
     _, turns = await _build_chat_payload(
         db,
@@ -277,16 +302,52 @@ async def send_message_stream(
 
     async def events() -> AsyncIterator[bytes]:
         started = time.time()
+
+        yield _sse("process", {"name": "Saving user prompt", "status": "started"})
         user_msg = await _persist_user_message(db, cid, body.content)
+        yield _sse("process", {"name": "Saving user prompt", "status": "completed"})
+
+        yield _sse("process", {"name": "Updating conversation metadata", "status": "started"})
         await _bump_conversation_title(db, c, body.content)
+        yield _sse("process", {"name": "Updating conversation metadata", "status": "completed"})
 
         yield _sse("user", serialize_message(user_msg))
 
-        retrieval = await _cached_retrieve(db, body.content, tenant_id=tenant_for(user))
+        yield _sse("process", {"name": "Checking ticket escalation intent", "status": "started"})
+        if _detect_ticket_intent(body.content):
+            yield _sse("process", {"name": "Checking ticket escalation intent", "status": "completed"})
+            yield _sse("process", {"name": "Preparing escalation guidance", "status": "started"})
+            yield _sse("citations", [])
+            for chunk in _TICKET_INTENT_RESPONSE.split(" "):
+                yield _sse("token", {"delta": chunk + " "})
+            assistant_msg = await _persist_ticket_intent_reply(db, cid, started)
+            yield _sse("process", {"name": "Preparing escalation guidance", "status": "completed"})
+            yield _sse("process", {"name": "Completed", "status": "completed"})
+            yield _sse("done", serialize_message(assistant_msg))
+            return
+        yield _sse("process", {"name": "Checking ticket escalation intent", "status": "completed"})
+
+        yield _sse("process", {"name": "Enhancing user query", "status": "started"})
+        enhanced_query, enhanced_intent = await _enhance_query(db, cid, body.content)
+        yield _sse("process", {"name": "Enhancing user query", "status": "completed"})
+
+        yield _sse("process", {"name": "Retrieving relevant knowledge", "status": "started"})
+        retrieval = await _cached_retrieve(
+            db,
+            body.content,
+            tenant_id=tenant_for(user),
+            rewritten=enhanced_query,
+            intent=enhanced_intent,
+        )
         citations = retrieval.citations()
+        yield _sse("process", {"name": "Retrieving relevant knowledge", "status": "completed"})
         yield _sse("citations", citations)
 
+        yield _sse("process", {"name": "Loading user memory", "status": "started"})
         memory_snippets = await agent_memory.search_user_memory(user.userId, body.content)
+        yield _sse("process", {"name": "Loading user memory", "status": "completed"})
+
+        yield _sse("process", {"name": "Composing model prompt", "status": "started"})
         _, turns = await _build_chat_payload(
             db,
             cid,
@@ -294,17 +355,22 @@ async def send_message_stream(
             retrieval.context_block(),
             memory_snippets,
         )
+        yield _sse("process", {"name": "Composing model prompt", "status": "completed"})
 
         accum: list[str] = []
         llm_failed = False
+        yield _sse("process", {"name": "Generating assistant response", "status": "started"})
         try:
-            async for delta in llm.chat_stream(turns):
+            async for delta in llm.chat_stream(turns, reasoning=True):
                 accum.append(delta)
                 yield _sse("token", {"delta": delta})
         except Exception as err:
             log.exception("stream LLM failed: %s", err)
             accum = ["I'm having trouble reaching the model right now. Please try again, or open a support ticket."]
             llm_failed = True
+            yield _sse("process", {"name": "Generating assistant response", "status": "error"})
+        else:
+            yield _sse("process", {"name": "Generating assistant response", "status": "completed"})
 
         full = "".join(accum).strip()
         answer, can_answer, used_idx = _try_parse_structured(full)
@@ -319,6 +385,7 @@ async def send_message_stream(
             else citations
         )
 
+        yield _sse("process", {"name": "Saving assistant response", "status": "started"})
         assistant_msg = {
             "_id": await next_id("messages"),
             "conversationId": cid,
@@ -335,6 +402,8 @@ async def send_message_stream(
         }
         await db.messages.insert_one(assistant_msg)
         await agent_memory.add_exchange_memory(user.userId, body.content, answer)
+        yield _sse("process", {"name": "Saving assistant response", "status": "completed"})
+        yield _sse("process", {"name": "Completed", "status": "completed"})
         yield _sse("done", serialize_message(assistant_msg))
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -346,6 +415,92 @@ async def send_message_stream(
 
 def _sse(event: str, data: object) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
+
+
+def _detect_ticket_intent(content: str) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return False
+    return any(p.search(text) for p in _TICKET_INTENT_PATTERNS)
+
+
+async def _persist_ticket_intent_reply(db, cid: int, started: float) -> dict:
+    assistant_msg = {
+        "_id": await next_id("messages"),
+        "conversationId": cid,
+        "role": "assistant",
+        "content": _TICKET_INTENT_RESPONSE,
+        "citations": [],
+        "canAnswer": False,
+        "latencyMs": int((time.time() - started) * 1000),
+        "rating": None,
+        "feedbackComment": None,
+        "rewrittenQuery": None,
+        "intent": "ticket_request",
+        "createdAt": datetime.now(timezone.utc),
+    }
+    await db.messages.insert_one(assistant_msg)
+    return assistant_msg
+
+
+async def _enhance_query(db, cid: int, current: str) -> tuple[str, str]:
+    """Resolve follow-up references and produce a retrieval-friendly rewrite.
+
+    Uses the last few turns so pronouns and elliptical questions ("what about
+    that one?") become standalone queries.
+    """
+    if os.environ.get("DISABLE_QUERY_REWRITE", "").lower() in {"1", "true", "yes"}:
+        return current, "general"
+
+    recent = (
+        await db.messages.find(
+            {"conversationId": cid}, {"role": 1, "content": 1, "createdAt": 1}
+        )
+        .sort("createdAt", -1)
+        .to_list(length=6)
+    )
+    recent.reverse()
+    history_block = "\n".join(
+        f"{m['role']}: {(m.get('content') or '').strip()[:300]}"
+        for m in recent
+        if m.get("content")
+    ) or "(no prior turns)"
+
+    sys_prompt = (
+        "You enhance customer support queries for a knowledge-base retrieval step. "
+        "Given the recent conversation and the user's latest message, produce a single "
+        "self-contained query that:\n"
+        "- resolves pronouns and follow-up references using the prior turns,\n"
+        "- expands obvious acronyms and adds 1-2 useful synonyms when helpful,\n"
+        "- strips greetings and pleasantries,\n"
+        "- preserves proper nouns, error codes, and product names verbatim,\n"
+        "- stays under 30 words.\n"
+        "Also classify the intent.\n"
+        'Reply as JSON: {"rewritten": "<query>", "intent": "<one of: how_to | '
+        'troubleshooting | billing | account | policy | general>"}'
+    )
+    user_prompt = (
+        f"Recent conversation:\n{history_block}\n\n"
+        f"Latest user message:\n{current}"
+    )
+
+    try:
+        raw = await llm.chat(
+            [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            json_mode=True,
+            temperature=0.0,
+            max_tokens=200,
+        )
+        obj = json.loads(raw)
+        rewritten = (obj.get("rewritten") or "").strip() or current
+        intent = (obj.get("intent") or "general").strip() or "general"
+        return rewritten, intent
+    except Exception as err:
+        log.debug("query enhancement failed, using raw query: %s", err)
+        return current, "general"
 
 
 async def _persist_user_message(db, cid: int, content: str) -> dict:
@@ -379,8 +534,16 @@ async def _bump_conversation_title(db, convo: dict, first_user_content: str) -> 
         )
 
 
-async def _cached_retrieve(db, query: str, *, tenant_id: str | None = None):
-    cache_seed = f"{tenant_id or '_'}::{query}"
+async def _cached_retrieve(
+    db,
+    query: str,
+    *,
+    tenant_id: str | None = None,
+    rewritten: str | None = None,
+    intent: str | None = None,
+):
+    cache_key_query = rewritten or query
+    cache_seed = f"{tenant_id or '_'}::{cache_key_query}"
     key = f"retr:{hashlib.sha1(cache_seed.encode('utf-8')).hexdigest()}"
     cached = await cache.get(key)
     if cached:
@@ -395,7 +558,9 @@ async def _cached_retrieve(db, query: str, *, tenant_id: str | None = None):
         except Exception:
             pass
     metrics.RETRIEVAL_CALLS.labels(leg="cache", outcome="miss").inc()
-    result = await retrieve(db, query, tenant_id=tenant_id)
+    result = await retrieve(
+        db, query, tenant_id=tenant_id, pre_rewritten=rewritten, pre_intent=intent
+    )
     try:
         await cache.set(
             key,
@@ -428,12 +593,30 @@ async def _build_chat_payload(
         )
 
     sys_prompt = (
-        "You are Helia, an AI customer support assistant. Answer the user's question using "
-        "ONLY the numbered context snippets below.\n"
+        "You are Helia, a warm and helpful AI customer support assistant. "
+        "Answer the user's question using ONLY the numbered context snippets below.\n\n"
+        "Tone and style:\n"
+        "- Be friendly, polite, and reassuring. Open with a brief, warm acknowledgement "
+        '(for example: "Happy to help with that!", "I can definitely help you sort this out.", '
+        '"Sorry you\'re running into this — let\'s get it fixed."). Vary the wording naturally; '
+        "do not reuse the same opener every turn.\n"
+        "- Speak in first person and address the user directly. Sound like a real support teammate, "
+        "not a generic bot.\n"
+        "- Keep responses concise but genuinely helpful — no filler, no condescension.\n\n"
+        "Solution intent (important):\n"
+        "- After acknowledging, state the likely cause(s) in plain language when the context supports it.\n"
+        "- Then clearly explain what the user should do or check to resolve the issue "
+        '(for example: "Try clearing your browser cache, disabling extensions, and checking '
+        'compatibility mode — these often resolve loading issues.", "You can check your order '
+        'status here, or I can open a support ticket to track the shipment for you"). '
+        "Guide them through steps kindly and clearly. Be their helper, not just a list of tasks.\n"
+        "- Only suggest actions the user can actually take themselves; never claim you can access "
+        "their system or perform technical actions on their behalf.\n\n"
+        "Grounding and citations:\n"
         "- Cite sources inline using [n] notation matching the snippets you used.\n"
-        "- If the answer cannot be found in the context, set canAnswer to false and suggest "
-        "opening a support ticket.\n"
-        "- Keep answers concise, friendly, and accurate.\n\n"
+        "- If the answer cannot be found in the context, set canAnswer to false, apologise briefly, "
+        "and offer to open a support ticket so a human teammate can follow up.\n"
+        "- Never invent facts, policies, or steps that are not supported by the context.\n\n"
         'Respond as JSON with this exact shape:\n'
         '{ "answer": string, "canAnswer": boolean, "usedCitations": number[] }\n\n'
         f"{memory_block}"
@@ -461,7 +644,7 @@ async def _build_chat_payload(
 
 async def _generate_answer(turns: list[llm.ChatTurn]) -> tuple[str, bool | None, list[int]]:
     try:
-        raw = await llm.chat(turns, json_mode=True)
+        raw = await llm.chat(turns, json_mode=True, reasoning=True)
         metrics.LLM_CALLS.labels(provider="auto", kind="chat", outcome="ok").inc()
     except Exception as err:
         metrics.LLM_CALLS.labels(provider="auto", kind="chat", outcome="error").inc()

@@ -57,9 +57,14 @@ async def chat(
     json_mode: bool = False,
     temperature: float = 0.2,
     max_tokens: int = 2048,
+    reasoning: bool = False,
 ) -> str:
     return await pwc_ai.chat(
-        messages, json_mode=json_mode, temperature=temperature, max_tokens=max_tokens
+        messages,
+        json_mode=json_mode,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        reasoning=reasoning,
     )
 
 
@@ -68,6 +73,7 @@ async def chat_stream(
     *,
     temperature: float = 0.2,
     max_tokens: int = 2048,
+    reasoning: bool = False,
 ) -> AsyncIterator[str]:
     """Stream content deltas from the PwC gateway.
 
@@ -86,6 +92,8 @@ async def chat_stream(
         "temperature": temperature,
         "stream": True,
     }
+    if reasoning:
+        body["reasoning_effort"] = pwc_ai._default_reasoning_effort()
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -93,29 +101,38 @@ async def chat_stream(
     }
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream(
-            "POST", f"{pwc_ai.BASE_URL}/chat/completions", headers=headers, json=body
-        ) as r:
-            if r.status_code >= 400:
-                detail = (await r.aread())[:300]
-                raise RuntimeError(f"PwC stream error {r.status_code}: {detail!r}")
+        attempt_body = body
+        while True:
+            async with client.stream(
+                "POST", f"{pwc_ai.BASE_URL}/chat/completions", headers=headers, json=attempt_body
+            ) as r:
+                if r.status_code >= 400:
+                    detail = (await r.aread())[:300]
+                    detail_text = detail.decode("utf-8", errors="replace") if isinstance(detail, (bytes, bytearray)) else str(detail)
+                    if "reasoning_effort" in attempt_body and pwc_ai._should_retry_without_reasoning(
+                        r.status_code, detail_text
+                    ):
+                        attempt_body = {k: v for k, v in attempt_body.items() if k != "reasoning_effort"}
+                        continue
+                    raise RuntimeError(f"PwC stream error {r.status_code}: {detail_text!r}")
 
-            content_type = r.headers.get("content-type", "")
-            if "text/event-stream" not in content_type:
-                # Gateway returned a buffered JSON response — emit the full content as one chunk.
-                raw = await r.aread()
-                try:
-                    data = _json.loads(raw)
-                    full = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-                except Exception:
-                    full = raw.decode("utf-8", errors="replace")
-                if full:
-                    yield full
+                content_type = r.headers.get("content-type", "")
+                if "text/event-stream" not in content_type:
+                    # Gateway returned a buffered JSON response — emit the full content as one chunk.
+                    raw = await r.aread()
+                    try:
+                        data = _json.loads(raw)
+                        full = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+                    except Exception:
+                        full = raw.decode("utf-8", errors="replace")
+                    if full:
+                        yield full
+                    return
+
+                async for line in r.aiter_lines():
+                    async for delta in _parse_sse_chunk(line):
+                        yield delta
                 return
-
-            async for line in r.aiter_lines():
-                async for delta in _parse_sse_chunk(line):
-                    yield delta
 
 
 # ---------------------------------------------------------------------------

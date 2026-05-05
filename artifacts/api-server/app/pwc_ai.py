@@ -15,9 +15,14 @@ from typing import Any, Literal, TypedDict
 import httpx
 
 BASE_URL = "https://genai-sharedservice-americas.pwc.com"
-CHAT_MODEL = "vertex_ai.gemini-2.5-flash-image"
+CHAT_MODEL = "azure.grok-4-fast-reasoning"
 EMBEDDING_MODEL = "vertex_ai.gemini-embedding"
 log = logging.getLogger("api-server.pwc_ai")
+
+
+def _default_reasoning_effort() -> str:
+    raw = (os.environ.get("PWC_REASONING_EFFORT") or "medium").strip().lower()
+    return raw if raw in {"low", "medium", "high"} else "medium"
 
 
 class ChatTurn(TypedDict):
@@ -56,6 +61,7 @@ async def chat(
     json_mode: bool = False,
     temperature: float = 0.2,
     max_tokens: int = 2048,
+    reasoning: bool = False,
 ) -> str:
     body: dict[str, Any] = {
         "model": _chat_model(),
@@ -65,6 +71,8 @@ async def chat(
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
+    if reasoning:
+        body["reasoning_effort"] = _default_reasoning_effort()
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         res, body = await _post_chat_with_json_fallback(client, body, json_mode=json_mode)
@@ -106,10 +114,16 @@ async def _post_chat_with_json_fallback(
     json_mode: bool,
 ) -> tuple[httpx.Response, dict[str, Any]]:
     res = await client.post(f"{BASE_URL}/chat/completions", headers=_headers(), json=body)
+    if res.status_code >= 400 and "reasoning_effort" in body:
+        detail = res.text[:500]
+        if _should_retry_without_reasoning(res.status_code, detail):
+            log.warning("reasoning_effort rejected by gateway/model; retrying without it")
+            body = {k: v for k, v in body.items() if k != "reasoning_effort"}
+            res = await client.post(f"{BASE_URL}/chat/completions", headers=_headers(), json=body)
     if json_mode and res.status_code >= 400:
         detail = res.text[:500]
-        # Gemini image deployments may reject response_format even when the
-        # request is otherwise valid. Retry once without response_format.
+        # Some deployments may reject response_format even when the request is
+        # otherwise valid. Retry once without response_format.
         model = str(body.get("model") or "")
         if _should_retry_without_response_format(res.status_code, detail) or model.endswith("-image"):
             log.warning(
@@ -118,6 +132,15 @@ async def _post_chat_with_json_fallback(
             body = {k: v for k, v in body.items() if k != "response_format"}
             res = await client.post(f"{BASE_URL}/chat/completions", headers=_headers(), json=body)
     return res, body
+
+
+def _should_retry_without_reasoning(status_code: int, detail: str) -> bool:
+    if status_code not in {400, 404, 415, 422}:
+        return False
+    text = (detail or "").lower()
+    return "reasoning_effort" in text and any(
+        m in text for m in ("unsupported", "not supported", "unknown", "invalid", "unrecognized")
+    )
 
 
 def _chat_model_fallbacks(*, current: str, allowed: list[str] | None = None) -> list[str]:

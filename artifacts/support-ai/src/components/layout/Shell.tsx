@@ -27,9 +27,20 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen overflow-hidden bg-background">
       {/* Sidebar */}
       <div className="w-64 flex-shrink-0 flex flex-col bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
-        <div className="h-1 pwc-accent-bar" />
-        <div className="h-14 flex items-center px-4 border-b border-sidebar-border">
-          <PwcWordmark variant="dark" product="Helia" size="md" />
+        <div className="relative shrink-0 border-b border-sidebar-border/45">
+          <div className="h-0.5 w-full pwc-accent-bar shrink-0" aria-hidden />
+          <div className="relative px-3.5 py-4">
+            <div
+              className="pointer-events-none absolute inset-0 bg-[radial-gradient(100%_120%_at_0%_-20%,hsl(var(--sidebar-accent)/0.18)_0%,transparent_58%)]"
+              aria-hidden
+            />
+            <Link
+              href="/app"
+              className="relative flex rounded-xl bg-black px-2.5 py-2 outline-none ring-sidebar-ring transition-colors hover:bg-neutral-950 focus-visible:ring-2 focus-visible:ring-sidebar-ring focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+            >
+              <PwcWordmark variant="dark" product="Helia" size="lg" layout="inline" />
+            </Link>
+          </div>
         </div>
         
         <div className="flex-1 overflow-y-auto py-4">

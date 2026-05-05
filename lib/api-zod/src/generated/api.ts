@@ -157,6 +157,8 @@ export const GetDocumentResponse = zod
           matchedDocumentId: zod.number().nullish(),
           matchedDocumentName: zod.string().nullish(),
           matchedChunkId: zod.number().nullish(),
+          matchedSnippet: zod.string().nullish(),
+          matchedChunkPosition: zod.number().nullish(),
           sourceChunkPosition: zod
             .number()
             .min(
