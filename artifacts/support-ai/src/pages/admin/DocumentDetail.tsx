@@ -13,6 +13,43 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
 
+type DedupDebugInfo = {
+  mode: string;
+  dedupMethod: string | null;
+  embeddingsAvailable: boolean;
+  vectorSearchEnabled: boolean;
+  thresholds: {
+    jaccard: number | null;
+    cosine: number | null;
+  };
+};
+
+function parseDedupDebug(value: unknown): DedupDebugInfo | null {
+  if (!value || typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  const thresholdsObj =
+    obj.thresholds && typeof obj.thresholds === "object"
+      ? (obj.thresholds as Record<string, unknown>)
+      : null;
+
+  return {
+    mode: typeof obj.mode === "string" ? obj.mode : "unknown",
+    dedupMethod: typeof obj.dedupMethod === "string" ? obj.dedupMethod : null,
+    embeddingsAvailable: Boolean(obj.embeddingsAvailable),
+    vectorSearchEnabled: Boolean(obj.vectorSearchEnabled),
+    thresholds: {
+      jaccard: typeof thresholdsObj?.jaccard === "number" ? thresholdsObj.jaccard : null,
+      cosine: typeof thresholdsObj?.cosine === "number" ? thresholdsObj.cosine : null,
+    },
+  };
+}
+
+function parseIngestionDedupMethod(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  return typeof obj.dedupMethod === "string" ? obj.dedupMethod : null;
+}
+
 export default function AdminDocumentDetail() {
   const params = useParams<{ id: string }>();
   const id = parseInt(params.id!, 10);
@@ -81,6 +118,10 @@ export default function AdminDocumentDetail() {
 
   if (isLoading) return <div className="p-8 flex justify-center"><Loader2 className="animate-spin h-8 w-8 text-primary" /></div>;
   if (!doc) return <div className="p-8">Document not found</div>;
+
+  const debugSource = (doc as unknown as Record<string, unknown>).dedupDebug;
+  const dedupDebug = parseDedupDebug(debugSource);
+  const dedupMethodLabel = dedupDebug?.dedupMethod ?? parseIngestionDedupMethod((doc as unknown as Record<string, unknown>).ingestionReport);
 
   const handleApprove = async () => {
     try {
@@ -386,6 +427,22 @@ export default function AdminDocumentDetail() {
                     ? "Potential duplicates are auto-removed on approval; you can manually exclude them now."
                     : "Manually remove duplicate chunks when needed."}
                 </CardDescription>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {dedupMethodLabel && (
+                    <Badge variant="outline" className="text-[10px]">Method: {dedupMethodLabel}</Badge>
+                  )}
+                  {typeof dedupDebug?.thresholds.jaccard === "number" && (
+                    <Badge variant="outline" className="text-[10px]">Jaccard ≥ {(dedupDebug.thresholds.jaccard * 100).toFixed(0)}%</Badge>
+                  )}
+                  {typeof dedupDebug?.thresholds.cosine === "number" && (
+                    <Badge variant="outline" className="text-[10px]">Cosine ≥ {(dedupDebug.thresholds.cosine * 100).toFixed(0)}%</Badge>
+                  )}
+                  {dedupDebug && (
+                    <Badge variant="outline" className="text-[10px]">
+                      {dedupDebug.vectorSearchEnabled ? "Vector search on" : "Vector search off"}
+                    </Badge>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
                 {doc.duplicateFindings.length === 0 ? (

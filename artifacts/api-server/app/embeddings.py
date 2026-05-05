@@ -63,8 +63,29 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
-def index_name() -> str:
-    return os.environ.get("MONGODB_VECTOR_INDEX", "chunks_vector_index")
+def embedding_version() -> int:
+    """Active embedding generation. Bump this when rotating model / dim.
+
+    Each chunk records ``embeddingVersion`` so old generations can co-exist
+    while a backfill rolls forward. Vector index name is suffixed with the
+    version so legacy and new indexes can be queried independently.
+    """
+    raw = os.environ.get("EMBEDDING_VERSION", "1")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def index_name(version: int | None = None) -> str:
+    """Versioned Atlas vector index name.
+
+    Defaults to the active version. Pass an explicit version to query a
+    legacy generation during a migration.
+    """
+    base = os.environ.get("MONGODB_VECTOR_INDEX", "chunks_vector_index")
+    v = version if version is not None else embedding_version()
+    return f"{base}_v{v}"
 
 
 def vector_search_enabled() -> bool:
@@ -75,7 +96,13 @@ def vector_search_enabled() -> bool:
 
 
 async def vector_search(
-    db, query_embedding: list[float], *, limit: int = 10, doc_ids: Iterable[int] | None = None
+    db,
+    query_embedding: list[float],
+    *,
+    limit: int = 10,
+    doc_ids: Iterable[int] | None = None,
+    tenant_id: str | None = None,
+    version: int | None = None,
 ) -> list[dict]:
     """Run an Atlas ``$vectorSearch`` aggregation against ``chunks``.
 
@@ -86,10 +113,11 @@ async def vector_search(
     query_vector = _fit_vector_dim(query_embedding, llm.embedding_dim())
     if not query_vector:
         return []
+    active_version = version if version is not None else embedding_version()
     pipeline: list[dict] = [
         {
             "$vectorSearch": {
-                "index": index_name(),
+                "index": index_name(active_version),
                 "path": "embedding",
                 "queryVector": query_vector,
                 "numCandidates": max(50, limit * 10),
@@ -97,21 +125,28 @@ async def vector_search(
             }
         }
     ]
+    filt: dict[str, object] = {}
     if doc_ids is not None:
         ids = list(doc_ids)
         if not ids:
             return []
-        pipeline[0]["$vectorSearch"]["filter"] = {"documentId": {"$in": ids}}
+        filt["documentId"] = {"$in": ids}
+    if tenant_id:
+        filt["tenantId"] = tenant_id
+    if filt:
+        pipeline[0]["$vectorSearch"]["filter"] = filt
 
     pipeline.append(
         {
             "$project": {
                 "_id": 1,
                 "documentId": 1,
+                "tenantId": 1,
                 "position": 1,
                 "content": 1,
                 "tokenCount": 1,
                 "metadata": 1,
+                "embeddingVersion": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
         }
@@ -123,9 +158,9 @@ async def vector_search(
 # Atlas Vector Search index management
 # ---------------------------------------------------------------------------
 
-def vector_index_definition() -> dict[str, Any]:
+def vector_index_definition(version: int | None = None) -> dict[str, Any]:
     return {
-        "name": index_name(),
+        "name": index_name(version),
         "type": "vectorSearch",
         "definition": {
             "fields": [
@@ -136,6 +171,8 @@ def vector_index_definition() -> dict[str, Any]:
                     "similarity": "cosine",
                 },
                 {"type": "filter", "path": "documentId"},
+                {"type": "filter", "path": "tenantId"},
+                {"type": "filter", "path": "embeddingVersion"},
             ]
         },
     }
@@ -207,19 +244,38 @@ async def embedding_coverage(db) -> dict[str, int]:
     }
 
 
-async def backfill_embeddings(db, *, batch: int = 64) -> dict[str, int]:
-    """One-shot backfill: embed any chunks that are missing the ``embedding`` field.
+async def backfill_embeddings(
+    db,
+    *,
+    batch: int = 64,
+    target_version: int | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, int]:
+    """Backfill / migrate embeddings to ``target_version`` (default: active).
 
-    Useful after wiring up embeddings for the first time, or after switching
-    the embedding model.
+    Picks up any chunk where ``embeddingVersion`` is missing or below
+    ``target_version``, or where the ``embedding`` field is missing/empty.
+    Writes the new embedding and stamps ``embeddingVersion`` + the active
+    ``embeddingModel``. Safe to run alongside live traffic — old generations
+    keep serving until each chunk is rewritten.
     """
     if not llm.embeddings_available():
         return {"updated": 0, "skipped": 0, "error": 1}
 
-    cursor = db.chunks.find(
-        {"$or": [{"embedding": {"$exists": False}}, {"embedding": {"$size": 0}}]},
-        {"_id": 1, "content": 1},
-    )
+    target = target_version if target_version is not None else embedding_version()
+
+    query: dict[str, object] = {
+        "$or": [
+            {"embedding": {"$exists": False}},
+            {"embedding": {"$size": 0}},
+            {"embeddingVersion": {"$exists": False}},
+            {"embeddingVersion": {"$lt": target}},
+        ]
+    }
+    if tenant_id:
+        query["tenantId"] = tenant_id
+
+    cursor = db.chunks.find(query, {"_id": 1, "content": 1})
     updated = 0
     skipped = 0
     pending: list[dict] = []
@@ -227,23 +283,34 @@ async def backfill_embeddings(db, *, batch: int = 64) -> dict[str, int]:
     async for row in cursor:
         pending.append(row)
         if len(pending) >= batch:
-            updated += await _flush_backfill(db, pending)
+            updated += await _flush_backfill(db, pending, target_version=target)
             pending = []
     if pending:
-        updated += await _flush_backfill(db, pending)
-    return {"updated": updated, "skipped": skipped}
+        updated += await _flush_backfill(db, pending, target_version=target)
+    return {"updated": updated, "skipped": skipped, "targetVersion": target}
 
 
-async def _flush_backfill(db, rows: list[dict]) -> int:
+async def _flush_backfill(db, rows: list[dict], *, target_version: int | None = None) -> int:
     texts = [r["content"] for r in rows]
     try:
         vectors = await embed_batch(texts)
     except Exception as err:
         log.warning("backfill embed failed for %d chunks: %s", len(rows), err)
         return 0
+    target = target_version if target_version is not None else embedding_version()
+    model_name = llm.embedding_model()
     for row, vec in zip(rows, vectors):
         if vec:
-            await db.chunks.update_one({"_id": row["_id"]}, {"$set": {"embedding": vec}})
+            await db.chunks.update_one(
+                {"_id": row["_id"]},
+                {
+                    "$set": {
+                        "embedding": vec,
+                        "embeddingVersion": target,
+                        "embeddingModel": model_name,
+                    }
+                },
+            )
     return len([v for v in vectors if v])
 
 

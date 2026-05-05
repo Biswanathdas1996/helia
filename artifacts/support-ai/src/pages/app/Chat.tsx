@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useParams } from "wouter";
 import { 
   useListConversations, 
@@ -10,19 +10,110 @@ import {
   getListConversationsQueryKey,
   getGetConversationQueryKey
 } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { Bot, FileText, Send, ThumbsDown, ThumbsUp, Ticket, AlertCircle, Loader2, MessageSquarePlus } from "lucide-react";
+import { Bot, FileText, Send, ThumbsDown, ThumbsUp, Ticket, AlertCircle, Loader2, MessageSquarePlus, Share2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const BULLET_RE = /^[-*]\s+/;
 const ORDERED_RE = /^\d+\.\s+/;
 const CITATION_RE = /\[(\d+)\]/g;
+
+type MemoryGraphNode = {
+  id: string;
+  label: string;
+  type: "user" | "memory" | "concept";
+};
+
+type MemoryGraphEdge = {
+  source: string;
+  target: string;
+  type: string;
+};
+
+type MemoryGraphResponse = {
+  query: string;
+  memoryCount: number;
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+};
+
+type MemoryGraphPoint = {
+  x: number;
+  y: number;
+};
+
+type MemoryGraphLayout = {
+  width: number;
+  height: number;
+  positionedNodes: Array<MemoryGraphNode & { position: MemoryGraphPoint }>;
+  positionedEdges: Array<MemoryGraphEdge & { from: MemoryGraphPoint; to: MemoryGraphPoint }>;
+};
+
+function buildMemoryGraphLayout(
+  nodes: MemoryGraphNode[] | undefined,
+  edges: MemoryGraphEdge[] | undefined,
+): MemoryGraphLayout {
+  const safeNodes = nodes ?? [];
+  const safeEdges = edges ?? [];
+  const width = 980;
+  const height = 430;
+
+  const userNodes = safeNodes.filter((n) => n.type === "user");
+  const memoryNodes = safeNodes.filter((n) => n.type === "memory");
+  const conceptNodes = safeNodes.filter((n) => n.type === "concept");
+
+  const positions = new Map<string, MemoryGraphPoint>();
+
+  if (userNodes.length > 0) {
+    positions.set(userNodes[0].id, { x: width / 2, y: 68 });
+  }
+
+  memoryNodes.forEach((node, idx) => {
+    const x = ((idx + 1) * width) / (memoryNodes.length + 1);
+    positions.set(node.id, { x, y: 200 });
+  });
+
+  conceptNodes.forEach((node, idx) => {
+    const x = ((idx + 1) * width) / (conceptNodes.length + 1);
+    positions.set(node.id, { x, y: 340 });
+  });
+
+  const positionedNodes = safeNodes
+    .filter((node) => positions.has(node.id))
+    .map((node) => ({
+      ...node,
+      position: positions.get(node.id) as MemoryGraphPoint,
+    }));
+
+  const positionedEdges = safeEdges
+    .map((edge) => {
+      const from = positions.get(edge.source);
+      const to = positions.get(edge.target);
+      if (!from || !to) {
+        return null;
+      }
+      return {
+        ...edge,
+        from,
+        to,
+      };
+    })
+    .filter(Boolean) as Array<MemoryGraphEdge & { from: MemoryGraphPoint; to: MemoryGraphPoint }>;
+
+  return {
+    width,
+    height,
+    positionedNodes,
+    positionedEdges,
+  };
+}
 
 function renderInlineCitations(text: string, keyPrefix: string): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
@@ -120,7 +211,28 @@ export default function Chat() {
   const { toast } = useToast();
 
   const [input, setInput] = useState("");
+  const [memoryGraphOpen, setMemoryGraphOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const memoryGraph = useQuery<MemoryGraphResponse>({
+    queryKey: ["chat-memory-graph", currentId],
+    enabled: Boolean(currentId) && memoryGraphOpen,
+    queryFn: async () => {
+      const res = await fetch(`/api/chat/conversations/${currentId}/memory-graph`, {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        throw new Error("Failed to load memory graph");
+      }
+      return (await res.json()) as MemoryGraphResponse;
+    },
+    staleTime: 60_000,
+  });
+
+  const memoryLayout = useMemo(
+    () => buildMemoryGraphLayout(memoryGraph.data?.nodes, memoryGraph.data?.edges),
+    [memoryGraph.data?.nodes, memoryGraph.data?.edges],
+  );
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -233,6 +345,29 @@ export default function Chat() {
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full bg-background relative">
+        <div className="border-b border-border/70 bg-background/90 backdrop-blur-sm">
+          <div className="max-w-4xl mx-auto px-4 md:px-8 py-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold truncate">
+                {activeConvo?.conversation?.title || "Conversation"}
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                Visualize user memory and related concepts for this thread.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMemoryGraphOpen(true)}
+              disabled={!currentId}
+              className="shrink-0"
+            >
+              <Share2 className="h-4 w-4 mr-2" />
+              Memory Graph
+            </Button>
+          </div>
+        </div>
+
         {!currentId && (
           <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center pointer-events-none">
             <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mb-6">
@@ -415,6 +550,88 @@ export default function Chat() {
             Helia AI can make mistakes. Consider verifying important information.
           </div>
         </div>
+
+        <Dialog open={memoryGraphOpen} onOpenChange={setMemoryGraphOpen}>
+          <DialogContent className="max-w-5xl w-[95vw] p-0 overflow-hidden">
+            <DialogHeader className="px-6 pt-6 pb-3">
+              <DialogTitle>Memory Graph</DialogTitle>
+              <DialogDescription>
+                Connected view of what Helia remembers for this user and conversation context.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="px-6 pb-6">
+              <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <Badge variant="outline">Nodes: {memoryGraph.data?.nodes.length ?? 0}</Badge>
+                <Badge variant="outline">Edges: {memoryGraph.data?.edges.length ?? 0}</Badge>
+                {memoryGraph.data?.query && (
+                  <Badge variant="outline" className="max-w-full truncate">
+                    Query seed: {memoryGraph.data.query}
+                  </Badge>
+                )}
+              </div>
+
+              {memoryGraph.isLoading ? (
+                <div className="h-[430px] border rounded-lg flex items-center justify-center gap-2 text-sm text-muted-foreground bg-muted/30">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading memory graph...
+                </div>
+              ) : memoryGraph.isError ? (
+                <div className="h-[430px] border rounded-lg flex items-center justify-center text-sm text-destructive bg-destructive/5">
+                  Could not load memory graph.
+                </div>
+              ) : (memoryGraph.data?.nodes.length ?? 0) <= 1 ? (
+                <div className="h-[430px] border rounded-lg flex items-center justify-center text-sm text-muted-foreground bg-muted/20">
+                  No user memory found yet. Continue chatting to build memory.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border bg-gradient-to-b from-slate-50/80 to-slate-100/80">
+                  <div
+                    className="relative h-[430px] min-w-[980px]"
+                    style={{ width: `${memoryLayout.width}px` }}
+                  >
+                    <svg
+                      className="absolute inset-0 h-full w-full"
+                      viewBox={`0 0 ${memoryLayout.width} ${memoryLayout.height}`}
+                    >
+                      {memoryLayout.positionedEdges.map((edge, idx) => (
+                        <line
+                          key={`${edge.source}-${edge.target}-${idx}`}
+                          x1={edge.from.x}
+                          y1={edge.from.y}
+                          x2={edge.to.x}
+                          y2={edge.to.y}
+                          stroke={edge.type === "remembers" ? "#1d4ed8" : "#64748b"}
+                          strokeOpacity={edge.type === "remembers" ? 0.5 : 0.35}
+                          strokeWidth={edge.type === "remembers" ? 2 : 1.5}
+                        />
+                      ))}
+                    </svg>
+
+                    {memoryLayout.positionedNodes.map((node) => (
+                      <div
+                        key={node.id}
+                        className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border px-3 py-2 text-xs shadow-sm max-w-[220px] text-center ${
+                          node.type === "user"
+                            ? "bg-blue-600 text-white border-blue-500"
+                            : node.type === "memory"
+                              ? "bg-white text-slate-900 border-slate-300"
+                              : "bg-amber-50 text-amber-900 border-amber-200"
+                        }`}
+                        style={{ left: `${node.position.x}px`, top: `${node.position.y}px` }}
+                        title={node.label}
+                      >
+                        <div className="font-medium mb-0.5">
+                          {node.type === "user" ? "User" : node.type === "memory" ? "Memory" : "Concept"}
+                        </div>
+                        <div className="line-clamp-2">{node.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

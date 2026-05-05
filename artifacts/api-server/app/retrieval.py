@@ -78,23 +78,31 @@ class RetrievalResult:
         return [c.to_citation() for c in self.chunks]
 
 
-async def retrieve(db: AsyncIOMotorDatabase, query: str) -> RetrievalResult:
+async def retrieve(
+    db: AsyncIOMotorDatabase, query: str, *, tenant_id: str | None = None
+) -> RetrievalResult:
     rewritten, intent = await _rewrite_query(query)
     search_query = rewritten or query
 
+    doc_query: dict[str, object] = {"status": "approved"}
+    if tenant_id:
+        doc_query["tenantId"] = tenant_id
     approved = await db.documents.find(
-        {"status": "approved"}, {"_id": 1, "name": 1, "sourceType": 1}
+        doc_query, {"_id": 1, "name": 1, "sourceType": 1, "governance": 1}
     ).to_list(length=None)
     doc_by_id: dict[int, dict[str, object]] = {d["_id"]: d for d in approved}
     approved_ids = list(doc_by_id.keys())
     if not approved_ids:
         return RetrievalResult(rewritten_query=search_query, intent=intent, chunks=[])
 
-    bm25_hits, vector_hits = await _hybrid_search(db, search_query, approved_ids)
+    bm25_hits, vector_hits = await _hybrid_search(db, search_query, approved_ids, tenant_id=tenant_id)
     fused = _reciprocal_rank_fusion(bm25_hits, vector_hits)
     deduped = _dedup_by_jaccard(fused)
     top = deduped[:_RERANK_LIMIT]
-    reranked = await _llm_rerank(search_query, top)
+    # Prefer Cohere/cross-encoder reranker if configured; fall back to LLM rerank.
+    reranked = await _external_rerank(search_query, top)
+    if reranked is None:
+        reranked = await _llm_rerank(search_query, top)
     final = reranked[:_FINAL_K]
 
     return RetrievalResult(
@@ -195,16 +203,20 @@ async def _rewrite_query(query: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 async def _hybrid_search(
-    db: AsyncIOMotorDatabase, query: str, approved_ids: list[int]
+    db: AsyncIOMotorDatabase,
+    query: str,
+    approved_ids: list[int],
+    *,
+    tenant_id: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    bm25 = await _bm25(db, query, approved_ids)
+    bm25 = await _bm25(db, query, approved_ids, tenant_id=tenant_id)
     vec: list[dict] = []
     if embeddings.vector_search_enabled():
         try:
             embs = await embeddings.embed_batch([query])
             if embs:
                 vec = await embeddings.vector_search(
-                    db, embs[0], limit=_VECTOR_LIMIT, doc_ids=approved_ids
+                    db, embs[0], limit=_VECTOR_LIMIT, doc_ids=approved_ids, tenant_id=tenant_id
                 )
         except Exception as err:
             log.warning("vector search failed, falling back to BM25 only: %s", err)
@@ -212,11 +224,20 @@ async def _hybrid_search(
     return bm25, vec
 
 
-async def _bm25(db: AsyncIOMotorDatabase, query: str, approved_ids: list[int]) -> list[dict]:
+async def _bm25(
+    db: AsyncIOMotorDatabase,
+    query: str,
+    approved_ids: list[int],
+    *,
+    tenant_id: str | None = None,
+) -> list[dict]:
+    base: dict[str, object] = {"documentId": {"$in": approved_ids}}
+    if tenant_id:
+        base["tenantId"] = tenant_id
     try:
         cursor = (
             db.chunks.find(
-                {"documentId": {"$in": approved_ids}, "$text": {"$search": query}},
+                {**base, "$text": {"$search": query}},
                 {
                     "_id": 1,
                     "documentId": 1,
@@ -237,12 +258,63 @@ async def _bm25(db: AsyncIOMotorDatabase, query: str, approved_ids: list[int]) -
     if rows:
         return rows
     fallback = (
-        await db.chunks.find({"documentId": {"$in": approved_ids}})
+        await db.chunks.find(base)
         .sort("_id", -1)
         .limit(_BM25_LIMIT)
         .to_list(length=_BM25_LIMIT)
     )
     return [{**c, "score": 0.0} for c in fallback]
+
+
+# ---------------------------------------------------------------------------
+# Optional Cohere / cross-encoder reranker
+# ---------------------------------------------------------------------------
+
+async def _external_rerank(query: str, rows: list[dict]) -> list[dict] | None:
+    """Call Cohere Rerank if ``COHERE_API_KEY`` is set. Returns reordered rows
+    or ``None`` to indicate the LLM-fallback path should run.
+    """
+    if len(rows) <= 1:
+        return rows
+    api_key = os.environ.get("COHERE_API_KEY")
+    if not api_key:
+        return None
+    model = os.environ.get("COHERE_RERANK_MODEL", "rerank-english-v3.0")
+    try:
+        import httpx  # local import; httpx is already a dep
+
+        body = {
+            "model": model,
+            "query": query,
+            "documents": [r.get("content", "") for r in rows],
+            "top_n": min(len(rows), _RERANK_LIMIT),
+        }
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                "https://api.cohere.com/v2/rerank",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=body,
+            )
+            r.raise_for_status()
+            data = r.json()
+        results = data.get("results") or []
+        out: list[dict] = []
+        seen: set[int] = set()
+        for item in results:
+            idx = item.get("index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(rows) or idx in seen:
+                continue
+            seen.add(idx)
+            score = float(item.get("relevance_score") or 0.0)
+            row = {**rows[idx], "score": score}
+            out.append(row)
+        for i, r in enumerate(rows):
+            if i not in seen:
+                out.append(r)
+        return out
+    except Exception as err:
+        log.warning("cohere rerank failed, falling back to LLM rerank: %s", err)
+        return None
 
 
 # ---------------------------------------------------------------------------

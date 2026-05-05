@@ -15,6 +15,8 @@ def iso(dt: Any) -> str:
 
 
 def serialize_document(doc: dict[str, Any]) -> dict[str, Any]:
+    from app.tenant import serialize_governance  # local import to avoid cycle
+
     return {
         "id": doc["_id"],
         "name": doc["name"],
@@ -33,6 +35,10 @@ def serialize_document(doc: dict[str, Any]) -> dict[str, Any]:
         "lastIngestionRunId": doc.get("lastIngestionRunId"),
         "createdBy": doc.get("createdBy"),
         "rejectionReason": doc.get("rejectionReason"),
+        "tenantId": doc.get("tenantId"),
+        "governance": serialize_governance(doc.get("governance")),
+        "embeddingVersion": doc.get("embeddingVersion"),
+        "embeddingModel": doc.get("embeddingModel"),
         "createdAt": iso(doc["createdAt"]),
         "updatedAt": iso(doc["updatedAt"]),
     }

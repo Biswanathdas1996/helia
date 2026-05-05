@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import AsyncIterator
@@ -11,17 +12,50 @@ from typing import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app import cache, llm, metrics, rate_limit
+from app import agent_memory, cache, llm, metrics, rate_limit
 from app.auth import AuthedUser, require_auth
 from app.db import get_db, next_id
 from app.retrieval import retrieve
 from app.schemas import CreateConversationBody, SendMessageBody
 from app.serialize import serialize_conversation, serialize_message
+from app.tenant import tenant_for
 
 router = APIRouter()
 log = logging.getLogger("api-server.chat")
 
 _RETRIEVAL_CACHE_TTL = 300
+_MEMORY_GRAPH_QUERY_FALLBACK = "user preferences profile support history"
+_MEMORY_STOP_WORDS = {
+    "about",
+    "again",
+    "also",
+    "been",
+    "because",
+    "between",
+    "could",
+    "have",
+    "help",
+    "into",
+    "just",
+    "more",
+    "need",
+    "please",
+    "that",
+    "their",
+    "them",
+    "there",
+    "they",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "would",
+    "your",
+    "from",
+    "user",
+}
 
 
 def _parse_id(raw: str) -> int:
@@ -109,6 +143,33 @@ async def get_conversation(id: str, user: AuthedUser = Depends(require_auth)) ->
     }
 
 
+@router.get("/chat/conversations/{id}/memory-graph")
+async def get_memory_graph(id: str, user: AuthedUser = Depends(require_auth)) -> dict[str, object]:
+    cid = _parse_id(id)
+    db = await get_db()
+    convo = await db.conversations.find_one({"_id": cid, "userId": user.userId})
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    recent_user_msgs = (
+        await db.messages.find(
+            {"conversationId": cid, "role": "user"},
+            {"content": 1, "createdAt": 1},
+        )
+        .sort("createdAt", -1)
+        .to_list(length=6)
+    )
+    query_seed = " ".join((m.get("content") or "").strip() for m in recent_user_msgs[:3]).strip()
+    if not query_seed:
+        query_seed = _MEMORY_GRAPH_QUERY_FALLBACK
+
+    memories = await agent_memory.search_user_memory(user.userId, query_seed, limit=18)
+    graph = _build_memory_graph(memories)
+    graph["query"] = query_seed
+    graph["memoryCount"] = len(memories)
+    return graph
+
+
 @router.delete("/chat/conversations/{id}", status_code=204)
 async def delete_conversation(id: str, user: AuthedUser = Depends(require_auth)) -> Response:
     cid = _parse_id(id)
@@ -142,8 +203,15 @@ async def send_message(
     user_msg = await _persist_user_message(db, cid, body.content)
     await _bump_conversation_title(db, c, body.content)
 
-    retrieval = await _cached_retrieve(db, body.content)
-    sys_prompt, turns = await _build_chat_payload(db, cid, body.content, retrieval.context_block())
+    retrieval = await _cached_retrieve(db, body.content, tenant_id=tenant_for(user))
+    memory_snippets = await agent_memory.search_user_memory(user.userId, body.content)
+    _, turns = await _build_chat_payload(
+        db,
+        cid,
+        body.content,
+        retrieval.context_block(),
+        memory_snippets,
+    )
 
     answer, can_answer, used_idx = await _generate_answer(turns)
     citations = retrieval.citations()
@@ -168,6 +236,7 @@ async def send_message(
         "createdAt": datetime.now(timezone.utc),
     }
     await db.messages.insert_one(assistant_msg)
+    await agent_memory.add_exchange_memory(user.userId, body.content, answer)
 
     return {
         "userMessage": serialize_message(user_msg),
@@ -200,12 +269,17 @@ async def send_message_stream(
 
         yield _sse("user", serialize_message(user_msg))
 
-        retrieval = await _cached_retrieve(db, body.content)
+        retrieval = await _cached_retrieve(db, body.content, tenant_id=tenant_for(user))
         citations = retrieval.citations()
         yield _sse("citations", citations)
 
-        sys_prompt, turns = await _build_chat_payload(
-            db, cid, body.content, retrieval.context_block()
+        memory_snippets = await agent_memory.search_user_memory(user.userId, body.content)
+        _, turns = await _build_chat_payload(
+            db,
+            cid,
+            body.content,
+            retrieval.context_block(),
+            memory_snippets,
         )
 
         accum: list[str] = []
@@ -244,6 +318,7 @@ async def send_message_stream(
             "createdAt": datetime.now(timezone.utc),
         }
         await db.messages.insert_one(assistant_msg)
+        await agent_memory.add_exchange_memory(user.userId, body.content, answer)
         yield _sse("done", serialize_message(assistant_msg))
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -288,8 +363,9 @@ async def _bump_conversation_title(db, convo: dict, first_user_content: str) -> 
         )
 
 
-async def _cached_retrieve(db, query: str):
-    key = f"retr:{hashlib.sha1(query.encode('utf-8')).hexdigest()}"
+async def _cached_retrieve(db, query: str, *, tenant_id: str | None = None):
+    cache_seed = f"{tenant_id or '_'}::{query}"
+    key = f"retr:{hashlib.sha1(cache_seed.encode('utf-8')).hexdigest()}"
     cached = await cache.get(key)
     if cached:
         from app.retrieval import RetrievalResult, RetrievedChunk
@@ -303,7 +379,7 @@ async def _cached_retrieve(db, query: str):
         except Exception:
             pass
     metrics.RETRIEVAL_CALLS.labels(leg="cache", outcome="miss").inc()
-    result = await retrieve(db, query)
+    result = await retrieve(db, query, tenant_id=tenant_id)
     try:
         await cache.set(
             key,
@@ -319,7 +395,22 @@ async def _cached_retrieve(db, query: str):
     return result
 
 
-async def _build_chat_payload(db, cid: int, current_user_content: str, context: str):
+async def _build_chat_payload(
+    db,
+    cid: int,
+    current_user_content: str,
+    context: str,
+    memory_snippets: list[str] | None = None,
+):
+    memory_block = ""
+    if memory_snippets:
+        memory_lines = "\n".join(f"- {m}" for m in memory_snippets[:5])
+        memory_block = (
+            "\n\nKnown user memory (preferences and profile facts):\n"
+            f"{memory_lines}\n"
+            "Use this only when relevant to the current request."
+        )
+
     sys_prompt = (
         "You are Helia, an AI customer support assistant. Answer the user's question using "
         "ONLY the numbered context snippets below.\n"
@@ -329,6 +420,7 @@ async def _build_chat_payload(db, cid: int, current_user_content: str, context: 
         "- Keep answers concise, friendly, and accurate.\n\n"
         'Respond as JSON with this exact shape:\n'
         '{ "answer": string, "canAnswer": boolean, "usedCitations": number[] }\n\n'
+        f"{memory_block}"
         f"Context:\n{context}"
     )
 
@@ -379,3 +471,59 @@ def _try_parse_structured(raw: str) -> tuple[str, bool | None, list[int]]:
         return answer, can_answer, used_idx
     except Exception:
         return raw, None, []
+
+
+def _build_memory_graph(memories: list[str]) -> dict[str, object]:
+    nodes: list[dict[str, object]] = [{"id": "user", "label": "You", "type": "user"}]
+    edges: list[dict[str, object]] = []
+    concept_ids: dict[str, str] = {}
+
+    for i, memory in enumerate(memories, start=1):
+        memory_id = f"m{i}"
+        compact = " ".join(memory.split())
+        nodes.append(
+            {
+                "id": memory_id,
+                "label": compact[:120],
+                "type": "memory",
+            }
+        )
+        edges.append({"source": "user", "target": memory_id, "type": "remembers"})
+
+        for keyword in _memory_keywords(compact):
+            key = keyword.lower()
+            concept_id = concept_ids.get(key)
+            if not concept_id:
+                concept_id = f"c{len(concept_ids) + 1}"
+                concept_ids[key] = concept_id
+                nodes.append(
+                    {
+                        "id": concept_id,
+                        "label": keyword.title(),
+                        "type": "concept",
+                    }
+                )
+            edges.append({"source": memory_id, "target": concept_id, "type": "mentions"})
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def _memory_keywords(text: str) -> list[str]:
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", text.lower())
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if token in _MEMORY_STOP_WORDS:
+            continue
+        if token.isdigit():
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+        if len(out) >= 3:
+            break
+    return out
