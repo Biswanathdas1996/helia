@@ -625,7 +625,28 @@ components:
           type: string
         score:
           type: number
-      required: [chunkId, documentId, documentName, snippet, score]
+        metadata:
+          $ref: "#/components/schemas/CitationMetadata"
+      required: [chunkId, documentId, documentName, snippet, score, metadata]
+
+    CitationMetadata:
+      type: object
+      properties:
+        fileName:
+          type: string
+        pageNumber:
+          type: ["integer", "null"]
+        keyPhrases:
+          type: array
+          items:
+            type: string
+        chunkPosition:
+          type: ["integer", "null"]
+        tokenCount:
+          type: ["integer", "null"]
+        sourceType:
+          type: ["string", "null"]
+      required: [fileName, keyPhrases]
 
     Message:
       type: object

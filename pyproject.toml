@@ -11,5 +11,6 @@ dependencies = [
     "pydantic>=2.7",
     "pymongo>=4.8",
     "python-multipart>=0.0.9",
+    "yake>=0.4.8",
     "uvicorn[standard]>=0.30",
 ]

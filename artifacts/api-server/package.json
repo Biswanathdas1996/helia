@@ -1,0 +1,11 @@
+{
+  "name": "@workspace/api-server",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "python -m uvicorn app.server:app --host 127.0.0.1 --port 8080 --reload",
+    "build": "echo 'FastAPI server does not require building'",
+    "start": "python -m uvicorn app.server:app --host 127.0.0.1 --port 8080",
+    "typecheck": "echo 'Python server does not require type checking'"
+  }
+}

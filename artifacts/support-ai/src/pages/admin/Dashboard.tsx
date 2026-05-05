@@ -1,17 +1,79 @@
 import { useGetAdminStats, useGetAdminTrend, useGetAdminActivity, useListDocuments } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { FileText, MessageSquare, Ticket as TicketIcon, Zap, CheckCircle2, AlertCircle, Clock, Search } from "lucide-react";
+import { FileText, MessageSquare, Ticket as TicketIcon, Zap, CheckCircle2, AlertCircle, Clock, Search, Loader2 } from "lucide-react";
 import { format } from "date-fns";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+interface VectorIndexCoverage {
+  total: number;
+  withEmbedding: number;
+  missingEmbedding: number;
+  percent: number;
+}
+
+interface VectorIndexItem {
+  name: string;
+  status?: string | null;
+  queryable?: boolean | null;
+}
+
+interface VectorIndexStatus {
+  embeddingsAvailable: boolean;
+  vectorSearchEnvFlag: boolean;
+  embeddingModel: string;
+  embeddingDim: number;
+  indexName: string;
+  exists: boolean;
+  queryable: boolean;
+  state?: string | null;
+  indexes: VectorIndexItem[];
+  embeddingCoverage: VectorIndexCoverage;
+}
+
+async function adminJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+    ...init,
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const message = typeof body?.detail === "string" ? body.detail : `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  return (await response.json()) as T;
+}
 
 export default function AdminDashboard() {
+  const queryClient = useQueryClient();
   const { data: stats } = useGetAdminStats();
   const { data: trend } = useGetAdminTrend();
   const { data: activity } = useGetAdminActivity();
   const { data: documents } = useListDocuments();
+  const vectorIndexStatus = useQuery<VectorIndexStatus, Error>({
+    queryKey: ["admin-vector-index-status"],
+    queryFn: () => adminJson<VectorIndexStatus>("/api/admin/vector-index"),
+    refetchInterval: (query) => {
+      const data = query.state.data as VectorIndexStatus | undefined;
+      return data?.queryable ? false : 5000;
+    },
+  });
+
+  const ensureVectorIndex = useMutation<Record<string, unknown>, Error, void>({
+    mutationFn: () => adminJson<Record<string, unknown>>("/api/admin/vector-index", { method: "POST" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["admin-vector-index-status"] });
+    },
+  });
   
   const pendingDocs = documents?.filter(d => d.status === "pending") || [];
 
@@ -65,6 +127,74 @@ export default function AdminDashboard() {
           </Card>
         ))}
       </div>
+
+      <Card className="shadow-sm">
+        <CardHeader className="pb-3 border-b border-border">
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-lg">Vector Index Status</CardTitle>
+            <div className="flex items-center gap-2">
+              {vectorIndexStatus.isFetching && !vectorIndexStatus.isLoading && (
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking...
+                </span>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => vectorIndexStatus.refetch()}
+                disabled={vectorIndexStatus.isFetching}
+              >
+                {vectorIndexStatus.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Refresh
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => ensureVectorIndex.mutate()}
+                disabled={ensureVectorIndex.isPending}
+              >
+                {ensureVectorIndex.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Ensure Index
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-4 space-y-3">
+          {vectorIndexStatus.isLoading ? (
+            <div className="h-20 flex items-center justify-center text-sm text-muted-foreground gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" /> Checking Atlas indexing status...
+            </div>
+          ) : vectorIndexStatus.error ? (
+            <div className="text-sm text-destructive">
+              Failed to load index status: {vectorIndexStatus.error.message}
+            </div>
+          ) : vectorIndexStatus.data ? (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={vectorIndexStatus.data.queryable ? "default" : "secondary"}>
+                  {vectorIndexStatus.data.queryable ? "Queryable" : "Building"}
+                </Badge>
+                <Badge variant="outline">State: {vectorIndexStatus.data.state ?? "UNKNOWN"}</Badge>
+                <Badge variant={vectorIndexStatus.data.exists ? "outline" : "destructive"}>
+                  {vectorIndexStatus.data.exists ? "Index Found" : "Index Missing"}
+                </Badge>
+                <Badge variant={vectorIndexStatus.data.vectorSearchEnvFlag ? "outline" : "destructive"}>
+                  {vectorIndexStatus.data.vectorSearchEnvFlag ? "Vector Search Enabled" : "MONGODB_VECTOR_SEARCH=false"}
+                </Badge>
+              </div>
+
+              <p className="text-sm text-muted-foreground">
+                Index: <span className="font-mono">{vectorIndexStatus.data.indexName}</span> • Embedding coverage: {vectorIndexStatus.data.embeddingCoverage.withEmbedding}/{vectorIndexStatus.data.embeddingCoverage.total} ({Math.round(vectorIndexStatus.data.embeddingCoverage.percent)}%)
+              </p>
+
+              {ensureVectorIndex.error ? (
+                <p className="text-sm text-destructive">Ensure index failed: {ensureVectorIndex.error.message}</p>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">No status data yet.</p>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Chart */}

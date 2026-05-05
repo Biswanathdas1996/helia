@@ -133,10 +133,10 @@ export default function NewDocument() {
         data: { ...values, sourceType, tags },
       });
       queryClient.invalidateQueries({ queryKey: getListDocumentsQueryKey() });
-      toast({ title: "Document ingested successfully" });
+      toast({ title: "Document submitted for approval" });
       setLocation(`/admin/documents/${doc.id}`);
     } catch {
-      toast({ title: "Failed to ingest document", variant: "destructive" });
+      toast({ title: "Failed to submit document", variant: "destructive" });
     }
   };
 
@@ -153,10 +153,10 @@ export default function NewDocument() {
       <Card>
         <CardHeader>
           <CardTitle className="text-2xl flex items-center gap-2">
-            <UploadCloud className="h-6 w-6 text-primary" /> Ingest Document
+            <UploadCloud className="h-6 w-6 text-primary" /> Submit Document
           </CardTitle>
           <CardDescription>
-            Drop any file — PDF, Word, PowerPoint, Excel, image, or plain text. AI extracts the content automatically.
+            Drop any file — PDF, Word, PowerPoint, Excel, image, or plain text. AI extracts content now, then ingestion and indexing run only after approval.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -334,7 +334,7 @@ export default function NewDocument() {
                 </Button>
                 <Button type="submit" disabled={createDocument.isPending || extracting || !hasContent}>
                   {createDocument.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Process & Ingest
+                  Submit for Approval
                 </Button>
               </div>
             </form>

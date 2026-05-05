@@ -164,12 +164,26 @@ export interface Conversation {
   updatedAt: string;
 }
 
+export interface CitationMetadata {
+  fileName: string;
+  /** @nullable */
+  pageNumber?: number | null;
+  keyPhrases: string[];
+  /** @nullable */
+  chunkPosition?: number | null;
+  /** @nullable */
+  tokenCount?: number | null;
+  /** @nullable */
+  sourceType?: string | null;
+}
+
 export interface Citation {
   chunkId: number;
   documentId: number;
   documentName: string;
   snippet: string;
   score: number;
+  metadata: CitationMetadata;
 }
 
 export type MessageRole = (typeof MessageRole)[keyof typeof MessageRole];

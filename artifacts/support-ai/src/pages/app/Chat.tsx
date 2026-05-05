@@ -232,6 +232,26 @@ export default function Chat() {
                                 {cite.documentName}
                               </div>
                               <p className="text-muted-foreground leading-relaxed">"...{cite.snippet}..."</p>
+                              <div className="mt-3">
+                                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
+                                  Chunk Metadata
+                                </p>
+                                <pre className="text-[11px] leading-relaxed bg-muted/60 border border-border rounded p-2 overflow-x-auto">
+{JSON.stringify(
+  {
+    fileName: cite.metadata?.fileName ?? cite.documentName,
+    pageNumber: cite.metadata?.pageNumber ?? null,
+    keyPhrases: cite.metadata?.keyPhrases ?? [],
+    chunkPosition: cite.metadata?.chunkPosition ?? null,
+    tokenCount: cite.metadata?.tokenCount ?? null,
+    sourceType: cite.metadata?.sourceType ?? null,
+    score: Number(cite.score.toFixed(3)),
+  },
+  null,
+  2,
+)}
+                                </pre>
+                              </div>
                             </PopoverContent>
                           </Popover>
                         ))}

@@ -34,6 +34,9 @@ async def _init() -> AsyncIOMotorDatabase:
         db.messages.create_index([("createdAt", DESCENDING)]),
         db.tickets.create_index([("userId", ASCENDING), ("createdAt", DESCENDING)]),
         db.tickets.create_index([("createdAt", DESCENDING)]),
+        db.audit_logs.create_index([("createdAt", DESCENDING)]),
+        db.audit_logs.create_index([("actor", ASCENDING), ("createdAt", DESCENDING)]),
+        db.audit_logs.create_index([("action", ASCENDING), ("createdAt", DESCENDING)]),
     )
     _db = db
     return db

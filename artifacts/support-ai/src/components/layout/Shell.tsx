@@ -1,14 +1,13 @@
-import { useUser, useClerk } from "@clerk/react";
 import { useGetMe } from "@workspace/api-client-react";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, MessageSquare, Ticket as TicketIcon, LogOut, Loader2 } from "lucide-react";
+import { LayoutDashboard, MessageSquare, Ticket as TicketIcon, LogOut, Loader2, FileText, UploadCloud } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { PwcWordmark } from "@/components/layout/PwcWordmark";
+import { useAuth } from "@/hooks/use-auth";
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { user } = useUser();
-  const { signOut } = useClerk();
+  const { user: authUser, logout } = useAuth();
   const [location] = useLocation();
   const { data: me, isLoading } = useGetMe();
 
@@ -17,9 +16,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
     { href: "/app/tickets", label: "Tickets", icon: TicketIcon },
   ];
 
-  if (me?.role === "admin") {
-    navItems.push({ href: "/admin", label: "Admin", icon: LayoutDashboard });
-  }
+  const adminNavItems = me?.role === "admin" ? [
+    { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/admin/documents", label: "Documents", icon: FileText },
+    { href: "/admin/documents/new", label: "Upload Document", icon: UploadCloud },
+    { href: "/admin/tickets", label: "Admin Tickets", icon: TicketIcon },
+  ] : [];
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -42,6 +44,22 @@ export function Shell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
+          {adminNavItems.length > 0 && (
+            <div className="mt-6 px-2">
+              <p className="px-3 mb-1 text-xs font-semibold uppercase tracking-wider text-sidebar-foreground/40">Admin</p>
+              <nav className="space-y-1">
+                {adminNavItems.map((item) => {
+                  const isActive = location === item.href || (item.href !== "/admin" && location.startsWith(`${item.href}/`));
+                  return (
+                    <Link key={item.href} href={item.href} className={`flex items-center px-3 py-2 text-sm font-medium rounded-md transition-colors ${isActive ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-sidebar-foreground/80 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"}`}>
+                      <item.icon className="mr-3 h-5 w-5 flex-shrink-0" aria-hidden="true" />
+                      {item.label}
+                    </Link>
+                  );
+                })}
+              </nav>
+            </div>
+          )}
         </div>
 
         <div className="p-4 border-t border-sidebar-border">
@@ -50,14 +68,14 @@ export function Shell({ children }: { children: React.ReactNode }) {
           ) : (
             <div className="flex items-center group">
               <Avatar className="h-9 w-9">
-                <AvatarImage src={user?.imageUrl} alt={user?.fullName || "User"} />
-                <AvatarFallback className="bg-sidebar-accent text-sidebar-accent-foreground">{user?.firstName?.charAt(0) || "U"}</AvatarFallback>
+                <AvatarImage src={authUser?.imageUrl ?? undefined} alt={[authUser?.firstName, authUser?.lastName].filter(Boolean).join(" ") || "User"} />
+                <AvatarFallback className="bg-sidebar-accent text-sidebar-accent-foreground">{authUser?.firstName?.charAt(0) || "U"}</AvatarFallback>
               </Avatar>
               <div className="ml-3 flex-1 overflow-hidden">
-                <p className="text-sm font-medium truncate">{user?.fullName}</p>
-                <p className="text-xs text-sidebar-foreground/60 truncate">{user?.primaryEmailAddress?.emailAddress}</p>
+                <p className="text-sm font-medium truncate">{[authUser?.firstName, authUser?.lastName].filter(Boolean).join(" ")}</p>
+                <p className="text-xs text-sidebar-foreground/60 truncate">{authUser?.email}</p>
               </div>
-              <Button variant="ghost" size="icon" className="text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => signOut()}>
+              <Button variant="ghost" size="icon" className="text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => logout()}>
                 <LogOut className="h-4 w-4" />
                 <span className="sr-only">Sign out</span>
               </Button>

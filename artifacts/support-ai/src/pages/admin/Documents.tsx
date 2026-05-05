@@ -4,14 +4,69 @@ import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Plus, Database, FileText, Search, AlertCircle } from "lucide-react";
+import { Plus, Database, FileText, Search, AlertCircle, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+interface VectorIndexCoverage {
+  total: number;
+  withEmbedding: number;
+  missingEmbedding: number;
+  percent: number;
+}
+
+interface VectorIndexStatus {
+  embeddingsAvailable: boolean;
+  vectorSearchEnvFlag: boolean;
+  embeddingModel: string;
+  embeddingDim: number;
+  indexName: string;
+  exists: boolean;
+  queryable: boolean;
+  state?: string | null;
+  embeddingCoverage: VectorIndexCoverage;
+}
+
+async function adminJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+    ...init,
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const message = typeof body?.detail === "string" ? body.detail : `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  return (await response.json()) as T;
+}
 
 export default function AdminDocuments() {
+  const queryClient = useQueryClient();
   const { data: documents, isLoading } = useListDocuments();
   const [, setLocation] = useLocation();
   const [search, setSearch] = useState("");
+  const vectorIndexStatus = useQuery<VectorIndexStatus, Error>({
+    queryKey: ["admin-vector-index-status"],
+    queryFn: () => adminJson<VectorIndexStatus>("/api/admin/vector-index"),
+    refetchInterval: (query) => {
+      const data = query.state.data as VectorIndexStatus | undefined;
+      return data?.queryable ? false : 5000;
+    },
+  });
+
+  const ensureVectorIndex = useMutation<Record<string, unknown>, Error, void>({
+    mutationFn: () => adminJson<Record<string, unknown>>("/api/admin/vector-index", { method: "POST" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["admin-vector-index-status"] });
+    },
+  });
 
   const filtered = documents?.filter(d => 
     d.name.toLowerCase().includes(search.toLowerCase()) || 
@@ -47,6 +102,74 @@ export default function AdminDocuments() {
           placeholder="Search documents by name or tag..." 
           className="border-0 shadow-none focus-visible:ring-0 px-0"
         />
+      </div>
+
+      <div className="border rounded-lg bg-background">
+        <div className="p-4 border-b border-border flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold">Vector Index Status</h2>
+            <p className="text-sm text-muted-foreground">Check Atlas indexing progress in real time</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {vectorIndexStatus.isFetching && !vectorIndexStatus.isLoading ? (
+              <span className="text-xs text-muted-foreground flex items-center gap-1">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking...
+              </span>
+            ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => vectorIndexStatus.refetch()}
+              disabled={vectorIndexStatus.isFetching}
+            >
+              {vectorIndexStatus.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Refresh
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => ensureVectorIndex.mutate()}
+              disabled={ensureVectorIndex.isPending}
+            >
+              {ensureVectorIndex.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Ensure Index
+            </Button>
+          </div>
+        </div>
+
+        <div className="p-4 space-y-3">
+          {vectorIndexStatus.isLoading ? (
+            <div className="h-16 flex items-center text-sm text-muted-foreground gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" /> Checking Atlas indexing status...
+            </div>
+          ) : vectorIndexStatus.error ? (
+            <p className="text-sm text-destructive">Failed to load index status: {vectorIndexStatus.error.message}</p>
+          ) : vectorIndexStatus.data ? (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={vectorIndexStatus.data.queryable ? "default" : "secondary"}>
+                  {vectorIndexStatus.data.queryable ? "Queryable" : "Building"}
+                </Badge>
+                <Badge variant="outline">State: {vectorIndexStatus.data.state ?? "UNKNOWN"}</Badge>
+                <Badge variant={vectorIndexStatus.data.exists ? "outline" : "destructive"}>
+                  {vectorIndexStatus.data.exists ? "Index Found" : "Index Missing"}
+                </Badge>
+                <Badge variant={vectorIndexStatus.data.vectorSearchEnvFlag ? "outline" : "destructive"}>
+                  {vectorIndexStatus.data.vectorSearchEnvFlag ? "Vector Search Enabled" : "MONGODB_VECTOR_SEARCH=false"}
+                </Badge>
+              </div>
+
+              <p className="text-sm text-muted-foreground">
+                Index: <span className="font-mono">{vectorIndexStatus.data.indexName}</span> • Embedding coverage: {vectorIndexStatus.data.embeddingCoverage.withEmbedding}/{vectorIndexStatus.data.embeddingCoverage.total} ({Math.round(vectorIndexStatus.data.embeddingCoverage.percent)}%)
+              </p>
+
+              {ensureVectorIndex.error ? (
+                <p className="text-sm text-destructive">Ensure index failed: {ensureVectorIndex.error.message}</p>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">No status data yet.</p>
+          )}
+        </div>
       </div>
 
       <div className="border rounded-lg bg-background overflow-hidden">

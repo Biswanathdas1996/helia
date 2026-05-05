@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis-data:/data
+
+  api-server:
+    build:
+      context: ./artifacts/api-server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on: [redis]
+    environment:
+      MONGODB_URI: ${MONGODB_URI}
+      SESSION_SECRET: ${SESSION_SECRET}
+      REDIS_URL: redis://redis:6379/0
+      PWC_AI_API_KEY: ${PWC_AI_API_KEY}
+      PWC_TOKEN: ${PWC_TOKEN}
+      PWC_CHAT_MODEL: ${PWC_CHAT_MODEL:-vertex_ai.gemini-2.5-flash-image}
+      PWC_EMBEDDING_MODEL: ${PWC_EMBEDDING_MODEL:-vertex_ai.gemini-embedding}
+      MONGODB_VECTOR_SEARCH: ${MONGODB_VECTOR_SEARCH:-true}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
+      ZOHO_DESK_DOMAIN: ${ZOHO_DESK_DOMAIN:-}
+      ZOHO_ORG_ID: ${ZOHO_ORG_ID:-}
+      ZOHO_REFRESH_TOKEN: ${ZOHO_REFRESH_TOKEN:-}
+      ZOHO_CLIENT_ID: ${ZOHO_CLIENT_ID:-}
+      ZOHO_CLIENT_SECRET: ${ZOHO_CLIENT_SECRET:-}
+      LOG_LEVEL: INFO
+    ports:
+      - "8080:8080"
+
+  web:
+    build:
+      context: .
+      dockerfile: artifacts/support-ai/Dockerfile
+    restart: unless-stopped
+    depends_on: [api-server]
+    ports:
+      - "8081:80"
+
+volumes:
+  redis-data: {}

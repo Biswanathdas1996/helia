@@ -1,34 +1,93 @@
-"""Clerk-based auth dependencies for FastAPI.
+"""Custom JWT-based auth for FastAPI.
 
-Mirrors the previous Express middleware:
-  - `require_auth` validates the Clerk session (Bearer token or session cookie),
-    fetches the user, computes their role, and attaches an `AuthedUser` to the
-    request for downstream handlers.
-  - `require_admin` ensures the resolved user has the admin role.
+Flow:
+  - POST /api/auth/register  → create user in MongoDB, return JWT cookie
+  - POST /api/auth/login     → verify password, return JWT cookie
+  - POST /api/auth/logout    → clear cookie
+  - GET  /api/me             → decode cookie, return AuthedUser
 
 Roles:
-  - The `ADMIN_EMAILS` env var (comma-separated) is the allow-list.
-  - If `ADMIN_EMAILS` is empty, the very first user (oldest by created_at)
-    becomes the admin (bootstrap behaviour).
+    - Role is stored on each user document ("admin" | "user").
+    - Legacy users without a role are bootstrapped: first user is admin, others are user.
 """
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from clerk_backend_api import Clerk
-from clerk_backend_api.security import (
-    AuthenticateRequestOptions,
-    authenticate_request,
-)
-from clerk_backend_api.models import GetUserListRequest
-import httpx
-from fastapi import Depends, HTTPException, Request, status
+import bcrypt
+import jwt
+from fastapi import Cookie, Depends, HTTPException, Request, Response, status
 
-log = logging.getLogger("api-server.auth")
+_JWT_ALGORITHM = "HS256"
+_COOKIE_NAME = "helia_session"
+_TOKEN_TTL_DAYS = 30
 
+
+def _jwt_secret() -> str:
+    s = os.environ.get("SESSION_SECRET", "")
+    if not s:
+        raise HTTPException(status_code=503, detail="Auth not configured (SESSION_SECRET missing)")
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Password helpers
+# ---------------------------------------------------------------------------
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
+
+
+# ---------------------------------------------------------------------------
+# JWT helpers
+# ---------------------------------------------------------------------------
+
+def create_token(user_id: str) -> str:
+    payload = {
+        "sub": user_id,
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(days=_TOKEN_TTL_DAYS),
+    }
+    return jwt.encode(payload, _jwt_secret(), algorithm=_JWT_ALGORITHM)
+
+
+def decode_token(token: str) -> str:
+    """Return user_id (sub) or raise HTTPException."""
+    try:
+        payload = jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
+        return payload["sub"]
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Session expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        _COOKIE_NAME,
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("NODE_ENV") == "production",
+        max_age=_TOKEN_TTL_DAYS * 86400,
+        path="/",
+    )
+
+
+def clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(_COOKIE_NAME, path="/")
+
+
+# ---------------------------------------------------------------------------
+# AuthedUser dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class AuthedUser:
@@ -40,100 +99,51 @@ class AuthedUser:
     role: str  # "admin" | "user"
 
 
-def _admin_emails() -> list[str]:
-    raw = os.environ.get("ADMIN_EMAILS", "")
-    return [s.strip().lower() for s in raw.split(",") if s.strip()]
+# ---------------------------------------------------------------------------
+# FastAPI dependencies
+# ---------------------------------------------------------------------------
 
-
-_clerk: Optional[Clerk] = None
-
-
-def _get_clerk() -> Clerk:
-    global _clerk
-    if _clerk is None:
-        secret = os.environ.get("CLERK_SECRET_KEY")
-        if not secret:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Clerk is not configured on the server.",
-            )
-        _clerk = Clerk(bearer_auth=secret)
-    return _clerk
-
-
-def _to_httpx_request(req: Request) -> httpx.Request:
-    """Build an httpx.Request mirror of the FastAPI request for Clerk's helpers."""
-    headers = {k: v for k, v in req.headers.items()}
-    # Use the original URL so Clerk can read host/path; body is irrelevant for auth.
-    return httpx.Request(req.method, str(req.url), headers=headers)
-
-
-async def require_auth(request: Request) -> AuthedUser:
+async def require_auth(
+    request: Request,
+    helia_session: Optional[str] = Cookie(default=None, alias=_COOKIE_NAME),
+) -> AuthedUser:
     if hasattr(request.state, "user") and request.state.user is not None:
         return request.state.user  # type: ignore[no-any-return]
 
-    secret = os.environ.get("CLERK_SECRET_KEY")
-    if not secret:
-        raise HTTPException(status_code=503, detail="Auth not configured")
-
-    try:
-        state = authenticate_request(
-            _to_httpx_request(request),
-            AuthenticateRequestOptions(secret_key=secret),
-        )
-    except Exception as err:  # pragma: no cover - defensive
-        log.exception("authenticate_request failed: %s", err)
+    if not helia_session:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    if not state.is_signed_in or not state.payload:
+    user_id = decode_token(helia_session)
+
+    from app.db import get_db
+    db = await get_db()
+    user = await db.users.find_one({"_id": user_id})
+    if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    user_id = state.payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    clerk = _get_clerk()
-    try:
-        user = clerk.users.get(user_id=user_id)
-    except Exception as err:
-        log.exception("clerk.users.get failed: %s", err)
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    primary_email_id = getattr(user, "primary_email_address_id", None)
-    email: Optional[str] = None
-    email_addresses = getattr(user, "email_addresses", None) or []
-    if primary_email_id:
-        for ea in email_addresses:
-            if getattr(ea, "id", None) == primary_email_id:
-                email = getattr(ea, "email_address", None)
-                break
-    if email is None and email_addresses:
-        email = getattr(email_addresses[0], "email_address", None)
-
-    role = "user"
-    allow_list = _admin_emails()
-    if email and email.lower() in allow_list:
-        role = "admin"
-    elif not allow_list:
-        # Bootstrap: first registered user becomes admin.
+    email = user.get("email", "")
+    role = user.get("role")
+    if role not in {"admin", "user"}:
+        # Bootstrap legacy users that predate the explicit role field.
+        role = "user"
         try:
-            first = clerk.users.list(
-                request=GetUserListRequest(limit=1, order_by="+created_at")
-            )
-            first_id = None
-            if first and len(first) > 0:
-                first_id = getattr(first[0], "id", None)
-            if first_id == user_id:
+            first = await db.users.find_one({}, sort=[("createdAt", 1)])
+            if first and first["_id"] == user_id:
                 role = "admin"
-        except Exception:  # pragma: no cover - non-fatal
+        except Exception:
             pass
+
+        await db.users.update_one(
+            {"_id": user_id},
+            {"$set": {"role": role, "updatedAt": datetime.now(timezone.utc)}},
+        )
 
     authed = AuthedUser(
         userId=user_id,
         email=email,
-        firstName=getattr(user, "first_name", None),
-        lastName=getattr(user, "last_name", None),
-        imageUrl=getattr(user, "image_url", None),
+        firstName=user.get("firstName"),
+        lastName=user.get("lastName"),
+        imageUrl=user.get("imageUrl"),
         role=role,
     )
     request.state.user = authed

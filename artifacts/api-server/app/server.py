@@ -1,21 +1,18 @@
-"""FastAPI application factory.
-
-Mounts all routes under /api so the shared workspace proxy (paths=['/api'])
-forwards traffic without rewriting the path — same contract as the previous
-Express server.
-"""
+"""FastAPI application factory."""
 from __future__ import annotations
 
 import logging
 import os
+import time
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.clerk_proxy import router as clerk_proxy_router
+from app import metrics
+from app.routes.auth import router as auth_router
 from app.routes.admin import router as admin_router
 from app.routes.chat import router as chat_router
 from app.routes.documents import router as documents_router
@@ -35,8 +32,6 @@ log = logging.getLogger("api-server")
 def create_app() -> FastAPI:
     app = FastAPI(title="Api", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
 
-    # Match the previous Express behaviour: `cors({ origin: true, credentials: true })`
-    # — reflect the request Origin and allow cookies (needed for Clerk session cookies).
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=".*",
@@ -45,19 +40,29 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    if not os.environ.get("CLERK_SECRET_KEY"):
-        log.warning(
-            "Clerk environment variables are missing; auth-protected routes will stay "
-            "unavailable in local startup."
-        )
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        started = time.time()
+        path_template = (request.scope.get("route").path  # type: ignore[union-attr]
+                         if request.scope.get("route") else request.url.path)
+        try:
+            response: Response = await call_next(request)
+            metrics.HTTP_REQUESTS.labels(
+                method=request.method, path=path_template, status=str(response.status_code)
+            ).inc()
+            metrics.HTTP_LATENCY.labels(method=request.method, path=path_template).observe(
+                time.time() - started
+            )
+            return response
+        except Exception:
+            metrics.HTTP_REQUESTS.labels(
+                method=request.method, path=path_template, status="500"
+            ).inc()
+            raise
 
-    # Clerk Frontend API proxy (production only). Mounted at /api/__clerk/*.
-    app.include_router(clerk_proxy_router)
-
-    # All API routes live under /api — the workspace proxy forwards paths=['/api']
-    # without rewriting, so handlers must include the prefix.
     api_routers = [
         health_router,
+        auth_router,
         me_router,
         admin_router,
         extract_router,
@@ -68,6 +73,11 @@ def create_app() -> FastAPI:
     ]
     for r in api_routers:
         app.include_router(r, prefix="/api")
+
+    @app.get("/api/metrics", include_in_schema=False)
+    async def metrics_endpoint() -> Response:
+        body, content_type = metrics.render()
+        return PlainTextResponse(body, media_type=content_type)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exc_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:

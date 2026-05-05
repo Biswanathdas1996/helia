@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
+from app import cache, llm, metrics, rate_limit
 from app.auth import AuthedUser, require_auth
 from app.db import get_db, next_id
-from app.pwc_ai import ChatTurn, chat as llm_chat
+from app.retrieval import retrieve
 from app.schemas import CreateConversationBody, SendMessageBody
 from app.serialize import serialize_conversation, serialize_message
 
 router = APIRouter()
 log = logging.getLogger("api-server.chat")
+
+_RETRIEVAL_CACHE_TTL = 300
 
 
 def _parse_id(raw: str) -> int:
@@ -113,12 +120,18 @@ async def delete_conversation(id: str, user: AuthedUser = Depends(require_auth))
     return Response(status_code=204)
 
 
+# ---------------------------------------------------------------------------
+# Send message (non-streaming)
+# ---------------------------------------------------------------------------
+
 @router.post("/chat/conversations/{id}/messages")
 async def send_message(
     id: str,
     body: SendMessageBody,
+    request: Request,
     user: AuthedUser = Depends(require_auth),
 ) -> dict[str, object]:
+    await rate_limit.enforce(request, scope="chat")
     cid = _parse_id(id)
     db = await get_db()
     c = await db.conversations.find_one({"_id": cid, "userId": user.userId})
@@ -126,142 +139,19 @@ async def send_message(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     started = time.time()
-    user_msg = {
-        "_id": await next_id("messages"),
-        "conversationId": cid,
-        "role": "user",
-        "content": body.content,
-        "citations": [],
-        "canAnswer": None,
-        "latencyMs": None,
-        "rating": None,
-        "feedbackComment": None,
-        "createdAt": datetime.now(timezone.utc),
-    }
-    await db.messages.insert_one(user_msg)
+    user_msg = await _persist_user_message(db, cid, body.content)
+    await _bump_conversation_title(db, c, body.content)
 
-    if c["title"] == "New conversation":
-        new_title = " ".join(body.content.split())[:60].strip()
-        await db.conversations.update_one(
-            {"_id": cid},
-            {"$set": {"title": new_title, "updatedAt": datetime.now(timezone.utc)}},
-        )
-    else:
-        await db.conversations.update_one(
-            {"_id": cid}, {"$set": {"updatedAt": datetime.now(timezone.utc)}}
-        )
+    retrieval = await _cached_retrieve(db, body.content)
+    sys_prompt, turns = await _build_chat_payload(db, cid, body.content, retrieval.context_block())
 
-    # Retrieve top chunks via Mongo $text across approved docs only.
-    approved_docs = await db.documents.find(
-        {"status": "approved"}, {"_id": 1, "name": 1}
-    ).to_list(length=None)
-    doc_name_by_id = {d["_id"]: d["name"] for d in approved_docs}
-    approved_ids = list(doc_name_by_id.keys())
-
-    citations: list[dict[str, object]] = []
-    context = ""
-    scored: list[dict] = []
-    if approved_ids:
-        try:
-            cursor = (
-                db.chunks.find(
-                    {
-                        "documentId": {"$in": approved_ids},
-                        "$text": {"$search": body.content},
-                    },
-                    {
-                        "_id": 1,
-                        "documentId": 1,
-                        "position": 1,
-                        "content": 1,
-                        "tokenCount": 1,
-                        "createdAt": 1,
-                        "score": {"$meta": "textScore"},
-                    },
-                )
-                .sort([("score", {"$meta": "textScore"})])
-                .limit(5)
-            )
-            scored = await cursor.to_list(length=5)
-        except Exception as err:
-            log.warning("$text search failed; falling back to recent chunks: %s", err)
-            scored = []
-        if not scored:
-            fallback = (
-                await db.chunks.find({"documentId": {"$in": approved_ids}})
-                .sort("_id", -1)
-                .limit(5)
-                .to_list(length=5)
-            )
-            scored = [{**c, "score": 0} for c in fallback]
-
-        for c2 in scored:
-            citations.append(
-                {
-                    "chunkId": c2["_id"],
-                    "documentId": c2["documentId"],
-                    "documentName": doc_name_by_id.get(c2["documentId"], "Untitled"),
-                    "snippet": c2["content"][:280],
-                    "score": round(float(c2.get("score") or 0), 3),
-                }
-            )
-        context = "\n\n".join(
-            f'[{i+1}] ({doc_name_by_id.get(c2["documentId"])}) {c2["content"]}'
-            for i, c2 in enumerate(scored)
-        )
-
-    recent = (
-        await db.messages.find({"conversationId": cid})
-        .sort("createdAt", 1)
-        .to_list(length=None)
+    answer, can_answer, used_idx = await _generate_answer(turns)
+    citations = retrieval.citations()
+    filtered = (
+        [citations[n - 1] for n in used_idx if 1 <= n <= len(citations)]
+        if used_idx
+        else citations
     )
-    recent_slice = recent[-6:]
-
-    sys_prompt = (
-        "You are Helia, an AI customer support assistant. Answer the user's question using "
-        "ONLY the numbered context snippets below.\n"
-        "- Cite sources inline using [n] notation matching the snippets you used.\n"
-        "- If the answer cannot be found in the context, set canAnswer to false and suggest "
-        "opening a support ticket.\n"
-        "- Keep answers concise, friendly, and accurate.\n\n"
-        'Respond as JSON with this exact shape:\n'
-        '{ "answer": string, "canAnswer": boolean, "usedCitations": number[] }\n\n'
-        f"Context:\n{context or '(no documents indexed yet)'}"
-    )
-
-    turns: list[ChatTurn] = [{"role": "system", "content": sys_prompt}]
-    for m in recent_slice[:-1]:
-        turns.append(
-            {
-                "role": "assistant" if m["role"] == "assistant" else "user",
-                "content": m["content"],
-            }
-        )
-    turns.append({"role": "user", "content": body.content})
-
-    answer = ""
-    can_answer: bool | None = None
-    used_idx: list[int] = []
-    try:
-        raw = await llm_chat(turns, json_mode=True)
-        parsed = json.loads(raw)
-        answer = parsed.get("answer") or ""
-        ca = parsed.get("canAnswer")
-        can_answer = ca if isinstance(ca, bool) else None
-        ui = parsed.get("usedCitations")
-        used_idx = [int(n) for n in ui] if isinstance(ui, list) else []
-    except Exception as err:
-        log.exception("LLM call failed: %s", err)
-        answer = (
-            "I'm having trouble reaching the model right now. "
-            "Please try again in a moment, or open a support ticket."
-        )
-        can_answer = False
-
-    if used_idx:
-        filtered = [citations[n - 1] for n in used_idx if 1 <= n <= len(citations)]
-    else:
-        filtered = citations
 
     assistant_msg = {
         "_id": await next_id("messages"),
@@ -273,6 +163,8 @@ async def send_message(
         "latencyMs": int((time.time() - started) * 1000),
         "rating": None,
         "feedbackComment": None,
+        "rewrittenQuery": retrieval.rewritten_query,
+        "intent": retrieval.intent,
         "createdAt": datetime.now(timezone.utc),
     }
     await db.messages.insert_one(assistant_msg)
@@ -281,3 +173,209 @@ async def send_message(
         "userMessage": serialize_message(user_msg),
         "assistantMessage": serialize_message(assistant_msg),
     }
+
+
+# ---------------------------------------------------------------------------
+# Send message (streaming SSE)
+# ---------------------------------------------------------------------------
+
+@router.post("/chat/conversations/{id}/messages/stream")
+async def send_message_stream(
+    id: str,
+    body: SendMessageBody,
+    request: Request,
+    user: AuthedUser = Depends(require_auth),
+) -> StreamingResponse:
+    await rate_limit.enforce(request, scope="chat")
+    cid = _parse_id(id)
+    db = await get_db()
+    c = await db.conversations.find_one({"_id": cid, "userId": user.userId})
+    if not c:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    async def events() -> AsyncIterator[bytes]:
+        started = time.time()
+        user_msg = await _persist_user_message(db, cid, body.content)
+        await _bump_conversation_title(db, c, body.content)
+
+        yield _sse("user", serialize_message(user_msg))
+
+        retrieval = await _cached_retrieve(db, body.content)
+        citations = retrieval.citations()
+        yield _sse("citations", citations)
+
+        sys_prompt, turns = await _build_chat_payload(
+            db, cid, body.content, retrieval.context_block()
+        )
+
+        accum: list[str] = []
+        try:
+            async for delta in llm.chat_stream(turns):
+                accum.append(delta)
+                yield _sse("token", {"delta": delta})
+        except Exception as err:
+            log.exception("stream LLM failed: %s", err)
+            accum = ["I'm having trouble reaching the model right now. Please try again, or open a support ticket."]
+
+        full = "".join(accum).strip()
+        answer, can_answer, used_idx = _try_parse_structured(full)
+        if not answer:
+            answer = full or "I couldn't generate a response."
+            can_answer = can_answer if can_answer is not None else True
+
+        filtered = (
+            [citations[n - 1] for n in used_idx if 1 <= n <= len(citations)]
+            if used_idx
+            else citations
+        )
+
+        assistant_msg = {
+            "_id": await next_id("messages"),
+            "conversationId": cid,
+            "role": "assistant",
+            "content": answer,
+            "citations": filtered,
+            "canAnswer": can_answer,
+            "latencyMs": int((time.time() - started) * 1000),
+            "rating": None,
+            "feedbackComment": None,
+            "rewrittenQuery": retrieval.rewritten_query,
+            "intent": retrieval.intent,
+            "createdAt": datetime.now(timezone.utc),
+        }
+        await db.messages.insert_one(assistant_msg)
+        yield _sse("done", serialize_message(assistant_msg))
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _sse(event: str, data: object) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
+
+
+async def _persist_user_message(db, cid: int, content: str) -> dict:
+    msg = {
+        "_id": await next_id("messages"),
+        "conversationId": cid,
+        "role": "user",
+        "content": content,
+        "citations": [],
+        "canAnswer": None,
+        "latencyMs": None,
+        "rating": None,
+        "feedbackComment": None,
+        "createdAt": datetime.now(timezone.utc),
+    }
+    await db.messages.insert_one(msg)
+    return msg
+
+
+async def _bump_conversation_title(db, convo: dict, first_user_content: str) -> None:
+    cid = convo["_id"]
+    if convo.get("title") == "New conversation":
+        new_title = " ".join(first_user_content.split())[:60].strip()
+        await db.conversations.update_one(
+            {"_id": cid},
+            {"$set": {"title": new_title, "updatedAt": datetime.now(timezone.utc)}},
+        )
+    else:
+        await db.conversations.update_one(
+            {"_id": cid}, {"$set": {"updatedAt": datetime.now(timezone.utc)}}
+        )
+
+
+async def _cached_retrieve(db, query: str):
+    key = f"retr:{hashlib.sha1(query.encode('utf-8')).hexdigest()}"
+    cached = await cache.get(key)
+    if cached:
+        from app.retrieval import RetrievalResult, RetrievedChunk
+        try:
+            metrics.RETRIEVAL_CALLS.labels(leg="cache", outcome="hit").inc()
+            return RetrievalResult(
+                rewritten_query=cached["rewritten_query"],
+                intent=cached["intent"],
+                chunks=[RetrievedChunk(**c) for c in cached["chunks"]],
+            )
+        except Exception:
+            pass
+    metrics.RETRIEVAL_CALLS.labels(leg="cache", outcome="miss").inc()
+    result = await retrieve(db, query)
+    try:
+        await cache.set(
+            key,
+            {
+                "rewritten_query": result.rewritten_query,
+                "intent": result.intent,
+                "chunks": [c.__dict__ for c in result.chunks],
+            },
+            ttl_seconds=_RETRIEVAL_CACHE_TTL,
+        )
+    except Exception as err:
+        log.debug("retrieval cache write failed: %s", err)
+    return result
+
+
+async def _build_chat_payload(db, cid: int, current_user_content: str, context: str):
+    sys_prompt = (
+        "You are Helia, an AI customer support assistant. Answer the user's question using "
+        "ONLY the numbered context snippets below.\n"
+        "- Cite sources inline using [n] notation matching the snippets you used.\n"
+        "- If the answer cannot be found in the context, set canAnswer to false and suggest "
+        "opening a support ticket.\n"
+        "- Keep answers concise, friendly, and accurate.\n\n"
+        'Respond as JSON with this exact shape:\n'
+        '{ "answer": string, "canAnswer": boolean, "usedCitations": number[] }\n\n'
+        f"Context:\n{context}"
+    )
+
+    recent = (
+        await db.messages.find({"conversationId": cid})
+        .sort("createdAt", 1)
+        .to_list(length=None)
+    )
+    recent_slice = recent[-6:]
+
+    turns: list[llm.ChatTurn] = [{"role": "system", "content": sys_prompt}]
+    for m in recent_slice[:-1]:
+        turns.append(
+            {
+                "role": "assistant" if m["role"] == "assistant" else "user",
+                "content": m["content"],
+            }
+        )
+    turns.append({"role": "user", "content": current_user_content})
+    return sys_prompt, turns
+
+
+async def _generate_answer(turns: list[llm.ChatTurn]) -> tuple[str, bool | None, list[int]]:
+    try:
+        raw = await llm.chat(turns, json_mode=True)
+        metrics.LLM_CALLS.labels(provider="auto", kind="chat", outcome="ok").inc()
+    except Exception as err:
+        metrics.LLM_CALLS.labels(provider="auto", kind="chat", outcome="error").inc()
+        log.exception("LLM call failed: %s", err)
+        return (
+            "I'm having trouble reaching the model right now. "
+            "Please try again in a moment, or open a support ticket.",
+            False,
+            [],
+        )
+    answer, can_answer, used_idx = _try_parse_structured(raw)
+    return answer or raw, can_answer, used_idx
+
+
+def _try_parse_structured(raw: str) -> tuple[str, bool | None, list[int]]:
+    try:
+        parsed = json.loads(raw)
+        answer = parsed.get("answer") or ""
+        ca = parsed.get("canAnswer")
+        can_answer = ca if isinstance(ca, bool) else None
+        ui = parsed.get("usedCitations")
+        used_idx = [int(n) for n in ui] if isinstance(ui, list) else []
+        return answer, can_answer, used_idx
+    except Exception:
+        return raw, None, []

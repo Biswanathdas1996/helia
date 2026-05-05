@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import logging
 import random
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app import zoho
+from app.audit import audit_log
 from app.auth import AuthedUser, require_auth
 from app.db import get_db, next_id
 from app.schemas import CreateTicketBody, UpdateTicketBody
 from app.serialize import serialize_ticket
 
 router = APIRouter()
+log = logging.getLogger("api-server.tickets")
 
 
 def _parse_id(raw: str) -> int:
@@ -32,12 +36,78 @@ async def list_tickets(user: AuthedUser = Depends(require_auth)) -> list[dict[st
     return [serialize_ticket(r) for r in rows]
 
 
+@router.get("/tickets/active-summary")
+async def active_summary(user: AuthedUser = Depends(require_auth)) -> dict[str, object]:
+    """Proactive open-ticket banner data for the chat sidebar.
+
+    Refreshes Zoho-side status for the user's open tickets so the UI shows
+    the latest update without the user having to navigate away.
+    """
+    db = await get_db()
+    rows = await db.tickets.find(
+        {"userId": user.userId, "status": {"$in": ["open", "in_progress"]}}
+    ).sort("updatedAt", -1).to_list(length=10)
+
+    if zoho.is_configured():
+        for r in rows:
+            ext = r.get("externalId")
+            if not ext or not str(ext).startswith("zoho:"):
+                continue
+            zid = str(ext).split(":", 1)[1]
+            data = await zoho.get_ticket(zid)
+            if not data:
+                continue
+            new_status = (data.get("status") or "").lower().replace(" ", "_") or r["status"]
+            new_update = data.get("statusType") or data.get("status") or r.get("lastUpdate")
+            await db.tickets.update_one(
+                {"_id": r["_id"]},
+                {
+                    "$set": {
+                        "status": new_status,
+                        "lastUpdate": new_update,
+                        "updatedAt": datetime.now(timezone.utc),
+                    }
+                },
+            )
+            r["status"] = new_status
+            r["lastUpdate"] = new_update
+
+    summary = [
+        {
+            "id": r["_id"],
+            "subject": r["subject"],
+            "status": r["status"],
+            "lastUpdate": r.get("lastUpdate"),
+            "externalId": r.get("externalId"),
+            "updatedAt": r.get("updatedAt"),
+        }
+        for r in rows
+    ]
+    return {"openCount": len(summary), "tickets": summary}
+
+
 @router.post("/tickets", status_code=201)
 async def create_ticket(
     body: CreateTicketBody, user: AuthedUser = Depends(require_auth)
 ) -> dict[str, object]:
     db = await get_db()
     now = datetime.now(timezone.utc)
+
+    external_id = f"HEL-{random.randint(10000, 99999)}"
+    if zoho.is_configured():
+        try:
+            resp = await zoho.create_ticket(
+                subject=body.subject,
+                description=body.description,
+                priority=body.priority,
+                requester_email=user.email,
+                requester_name=" ".join(filter(None, [user.firstName, user.lastName])).strip() or user.email,
+            )
+            if resp and resp.get("id"):
+                external_id = f"zoho:{resp['id']}"
+        except Exception as err:
+            log.warning("zoho create_ticket failed, keeping local id: %s", err)
+
     t = {
         "_id": await next_id("tickets"),
         "userId": user.userId,
@@ -45,13 +115,19 @@ async def create_ticket(
         "description": body.description,
         "priority": body.priority,
         "status": "open",
-        "externalId": f"HEL-{random.randint(10000, 99999)}",
+        "externalId": external_id,
         "relatedMessageId": body.relatedMessageId,
         "lastUpdate": "Ticket opened",
         "createdAt": now,
         "updatedAt": now,
     }
     await db.tickets.insert_one(t)
+    await audit_log(
+        action="ticket.create",
+        actor=user.email or user.userId,
+        target=external_id,
+        meta={"priority": body.priority, "subject": body.subject},
+    )
     return serialize_ticket(t)
 
 

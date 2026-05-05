@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: helia-web
+  labels: { app: helia-web }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: helia-web }
+  template:
+    metadata:
+      labels: { app: helia-web }
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/your-org/helia-web:latest
+          ports:
+            - containerPort: 80
+          resources:
+            requests: { cpu: "50m",  memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: helia-web
+spec:
+  selector: { app: helia-web }
+  ports:
+    - { port: 80, targetPort: 80, name: http }
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: helia
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  rules:
+    - host: helia.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: helia-api
+                port: { number: 80 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: helia-web
+                port: { number: 80 }

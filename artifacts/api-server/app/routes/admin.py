@@ -4,6 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 
+from app import embeddings as emb_lib
+from app import llm
+from app.audit import audit_log
 from app.auth import AuthedUser, require_admin
 from app.db import get_db
 from app.serialize import iso
@@ -168,3 +171,60 @@ async def get_admin_activity(_: AuthedUser = Depends(require_admin)) -> list[dic
 
     items.sort(key=lambda x: x["createdAt"], reverse=True)  # type: ignore[arg-type,return-value]
     return items[:25]
+
+
+# ---------------------------------------------------------------------------
+# Vector index management
+# ---------------------------------------------------------------------------
+
+@router.get("/admin/vector-index")
+async def get_vector_index_status(_: AuthedUser = Depends(require_admin)) -> dict[str, object]:
+    """Diagnostics for the Atlas Vector Search setup."""
+    db = await get_db()
+    indexes = await emb_lib.list_search_indexes(db)
+    coverage = await emb_lib.embedding_coverage(db)
+    target = emb_lib.index_name()
+    matched = next((idx for idx in indexes if idx.get("name") == target), None)
+    return {
+        "embeddingsAvailable": llm.embeddings_available(),
+        "vectorSearchEnvFlag": emb_lib.vector_search_enabled(),
+        "embeddingModel": llm.embedding_model(),
+        "embeddingDim": llm.embedding_dim(),
+        "indexName": target,
+        "exists": matched is not None,
+        "queryable": bool(matched and matched.get("queryable")),
+        "state": matched.get("status") if matched else None,
+        "indexes": [
+            {"name": idx.get("name"), "status": idx.get("status"), "queryable": idx.get("queryable")}
+            for idx in indexes
+        ],
+        "embeddingCoverage": coverage,
+        "definition": emb_lib.vector_index_definition(),
+    }
+
+
+@router.post("/admin/vector-index", status_code=201)
+async def create_vector_index(user: AuthedUser = Depends(require_admin)) -> dict[str, object]:
+    """Create the Atlas Vector Search index if it doesn't already exist.
+
+    Atlas takes 1–5 minutes to build the index after creation. The endpoint
+    returns immediately; poll ``GET /api/admin/vector-index`` to watch the
+    ``state`` field transition to ``READY``.
+    """
+    db = await get_db()
+    result = await emb_lib.ensure_vector_index(db)
+    await audit_log(action="vector_index.ensure", actor=user.email or user.userId, meta=result)
+    return result
+
+
+@router.post("/admin/embeddings/backfill")
+async def backfill_embeddings(user: AuthedUser = Depends(require_admin)) -> dict[str, object]:
+    """Embed any existing chunks that are missing the ``embedding`` field.
+
+    Useful right after enabling embeddings on a database whose chunks were
+    ingested before embedding generation was wired up.
+    """
+    db = await get_db()
+    result = await emb_lib.backfill_embeddings(db)
+    await audit_log(action="embeddings.backfill", actor=user.email or user.userId, meta=result)
+    return result

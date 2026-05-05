@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: helia-api
+  labels: { app: helia-api }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: helia-api }
+  template:
+    metadata:
+      labels: { app: helia-api }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/api/metrics"
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/your-org/helia-api:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef: { name: helia-api-secrets }
+          env:
+            - { name: REDIS_URL, value: "redis://helia-redis:6379/0" }
+            - { name: LOG_LEVEL, value: "INFO" }
+          readinessProbe:
+            httpGet: { path: /api/healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/healthz, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: helia-api
+spec:
+  selector: { app: helia-api }
+  ports:
+    - { port: 80, targetPort: 8080, name: http }
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: helia-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: helia-api
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
