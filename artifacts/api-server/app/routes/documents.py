@@ -33,6 +33,23 @@ _PREVIEW_COSINE = 0.68
 _VECTOR_SEARCH_CONCURRENCY = 8
 
 
+async def _delete_document_chunks(db, *, doc_id: int, tenant_id: str):
+    """Delete chunks for a document across tenant-scoped and legacy rows.
+
+    Legacy records may lack ``tenantId`` from older data; deleting both keeps
+    Atlas vector-search entries in sync when documents are removed/re-indexed.
+    """
+    return await db.chunks.delete_many(
+        {
+            "documentId": doc_id,
+            "$or": [
+                {"tenantId": tenant_id},
+                {"tenantId": {"$exists": False}},
+            ],
+        }
+    )
+
+
 def _dedup_debug_payload(*, preview_mode: bool, dedup_method: str | None = None) -> dict[str, object]:
     return {
         "mode": "preview" if preview_mode else "final",
@@ -724,9 +741,25 @@ async def delete_document(id: str, user: AuthedUser = Depends(require_admin)) ->
     governance = doc.get("governance") or {}
     if governance.get("legalHold"):
         raise HTTPException(status_code=423, detail="Document is on legal hold")
-    await db.chunks.delete_many({"documentId": doc_id, "tenantId": tenant_id})
-    await db.documents.delete_one({"_id": doc_id, "tenantId": tenant_id})
-    await audit_log(action="document.delete", actor=user.email or user.userId, target=str(doc_id))
+    chunk_delete_result = await _delete_document_chunks(db, doc_id=doc_id, tenant_id=tenant_id)
+    doc_delete_result = await db.documents.delete_one({"_id": doc_id, "tenantId": tenant_id})
+    await audit_log(
+        action="document.delete",
+        actor=user.email or user.userId,
+        target=str(doc_id),
+        meta={
+            "tenantId": tenant_id,
+            "chunkRowsDeleted": int(chunk_delete_result.deleted_count),
+            "documentRowsDeleted": int(doc_delete_result.deleted_count),
+        },
+    )
+    log.info(
+        "document.delete doc_id=%s tenant=%s chunks_deleted=%s doc_deleted=%s",
+        doc_id,
+        tenant_id,
+        chunk_delete_result.deleted_count,
+        doc_delete_result.deleted_count,
+    )
     return Response(status_code=204)
 
 
@@ -928,7 +961,15 @@ async def _execute_ingest(
         active_emb_version = emb_lib.embedding_version()
 
         await ctx.log("clearing prior chunks", progress=40)
-        await db.chunks.delete_many({"documentId": doc_id, "tenantId": tenant_id})
+        cleanup_result = await _delete_document_chunks(db, doc_id=doc_id, tenant_id=tenant_id)
+        await ctx.log(f"cleared {cleanup_result.deleted_count} prior chunks", progress=40)
+        log.info(
+            "document.reingest.cleanup doc_id=%s tenant=%s chunks_deleted=%s run_id=%s",
+            doc_id,
+            tenant_id,
+            cleanup_result.deleted_count,
+            run_id,
+        )
 
         kept_chunks = plan["kept_chunks"]
         kept_chunk_hashes = plan.get("kept_chunk_hashes") or []
@@ -1011,6 +1052,7 @@ async def _execute_ingest(
                 "dupes": len(plan["duplicate_findings"]),
                 "runId": run_id,
                 "tenantId": tenant_id,
+                "priorChunkRowsDeleted": int(cleanup_result.deleted_count),
             },
         )
         return {

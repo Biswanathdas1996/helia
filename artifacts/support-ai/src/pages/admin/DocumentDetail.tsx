@@ -190,6 +190,8 @@ export default function AdminDocumentDetail() {
   };
 
   const isPending = doc.status === "pending";
+  const cleanedMatchesOriginal = doc.cleanedText === doc.originalText;
+  const noTransformationsApplied = cleanedMatchesOriginal && doc.piiFindings.length === 0;
 
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-6">
@@ -378,7 +380,12 @@ export default function AdminDocumentDetail() {
       <Tabs defaultValue="findings" className="w-full">
         <TabsList className="mb-4">
           <TabsTrigger value="findings">Review Findings</TabsTrigger>
-          <TabsTrigger value="content">Cleaned Content</TabsTrigger>
+          <TabsTrigger value="content" className="gap-2">
+            Cleaned Content
+            {noTransformationsApplied ? (
+              <Badge variant="outline" className="text-[10px] font-normal">Unchanged</Badge>
+            ) : null}
+          </TabsTrigger>
           <TabsTrigger value="original">Original Content</TabsTrigger>
         </TabsList>
         
@@ -502,6 +509,17 @@ export default function AdminDocumentDetail() {
         <TabsContent value="content">
           <Card>
             <CardContent className="p-6">
+              {noTransformationsApplied ? (
+                <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+                  <div className="flex items-center gap-2 font-medium">
+                    <AlertTriangle className="h-4 w-4" />
+                    No redactions or content cleanup were applied.
+                  </div>
+                  <p className="mt-1 text-xs opacity-90">
+                    This document had no detected PII, so cleaned content is identical to the original text.
+                  </p>
+                </div>
+              ) : null}
               <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-foreground bg-muted/30 p-6 rounded-lg overflow-x-auto">
                 {doc.cleanedText}
               </pre>
