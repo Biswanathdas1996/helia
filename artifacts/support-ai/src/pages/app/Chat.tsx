@@ -34,7 +34,10 @@ import {
   Trash2,
   Paperclip,
   Star,
-  X
+  X,
+  User,
+  Brain,
+  Lightbulb
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -147,6 +150,18 @@ type MemoryGraphLayout = {
   positionedEdges: Array<MemoryGraphEdge & { from: MemoryGraphPoint; to: MemoryGraphPoint }>;
 };
 
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+function hash01(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i += 1) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 2 ** 32;
+}
+
+/** Fruchterman–Reingold–style layout: organic graph, anchored user node at top center. */
 function buildMemoryGraphLayout(
   nodes: MemoryGraphNode[] | undefined,
   edges: MemoryGraphEdge[] | undefined,
@@ -155,26 +170,139 @@ function buildMemoryGraphLayout(
   const safeEdges = edges ?? [];
   const width = 980;
   const height = 430;
+  const pad = 52;
+  const userAnchor: MemoryGraphPoint = { x: width / 2, y: 76 };
 
-  const userNodes = safeNodes.filter((n) => n.type === "user");
-  const memoryNodes = safeNodes.filter((n) => n.type === "memory");
-  const conceptNodes = safeNodes.filter((n) => n.type === "concept");
-
-  const positions = new Map<string, MemoryGraphPoint>();
-
-  if (userNodes.length > 0) {
-    positions.set(userNodes[0].id, { x: width / 2, y: 68 });
+  if (safeNodes.length === 0) {
+    return {
+      width,
+      height,
+      positionedNodes: [],
+      positionedEdges: [],
+    };
   }
 
-  memoryNodes.forEach((node, idx) => {
-    const x = ((idx + 1) * width) / (memoryNodes.length + 1);
-    positions.set(node.id, { x, y: 200 });
-  });
+  const area = width * height;
+  const k = Math.sqrt(area / Math.max(safeNodes.length, 1));
+  const iterations = 110;
+  const firstUser = safeNodes.find((n) => n.type === "user");
 
-  conceptNodes.forEach((node, idx) => {
-    const x = ((idx + 1) * width) / (conceptNodes.length + 1);
-    positions.set(node.id, { x, y: 340 });
-  });
+  type SimPoint = MemoryGraphPoint & { dx: number; dy: number };
+  const pos = new Map<string, SimPoint>();
+
+  let idx = 0;
+  for (const n of safeNodes) {
+    if (firstUser && n.id === firstUser.id) {
+      pos.set(n.id, { ...userAnchor, dx: 0, dy: 0 });
+      continue;
+    }
+    const t = idx * GOLDEN_ANGLE;
+    const u = hash01(n.id);
+    const radius = 95 + u * 105;
+    const cx = width / 2;
+    const cy = height * 0.48;
+    pos.set(n.id, {
+      x: cx + Math.cos(t) * radius,
+      y: cy + Math.sin(t) * radius * 0.82,
+      dx: 0,
+      dy: 0,
+    });
+    idx += 1;
+  }
+
+  const getP = (id: string) => pos.get(id);
+
+  for (let iter = 0; iter < iterations; iter += 1) {
+    const temperature = Math.max(0.12, 2.2 * Math.pow(1 - iter / iterations, 1.65));
+
+    for (const p of pos.values()) {
+      p.dx = 0;
+      p.dy = 0;
+    }
+
+    for (let a = 0; a < safeNodes.length; a += 1) {
+      for (let b = a + 1; b < safeNodes.length; b += 1) {
+        const na = safeNodes[a];
+        const nb = safeNodes[b];
+        const pa = getP(na.id);
+        const pb = getP(nb.id);
+        if (!pa || !pb) continue;
+
+        let vx = pa.x - pb.x;
+        let vy = pa.y - pb.y;
+        const dist = Math.max(6, Math.hypot(vx, vy));
+        const rep = (k * k) / dist;
+        vx = (vx / dist) * rep;
+        vy = (vy / dist) * rep;
+        pa.dx += vx;
+        pa.dy += vy;
+        pb.dx -= vx;
+        pb.dy -= vy;
+      }
+    }
+
+    for (const e of safeEdges) {
+      const pa = getP(e.source);
+      const pb = getP(e.target);
+      if (!pa || !pb) continue;
+      let vx = pb.x - pa.x;
+      let vy = pb.y - pa.y;
+      const dist = Math.max(6, Math.hypot(vx, vy));
+      const att = (dist * dist) / k;
+      vx = (vx / dist) * att * 0.42;
+      vy = (vy / dist) * att * 0.42;
+      pa.dx += vx;
+      pa.dy += vy;
+      pb.dx -= vx;
+      pb.dy -= vy;
+    }
+
+    if (firstUser) {
+      const pu = getP(firstUser.id);
+      if (pu) {
+        pu.dx += (userAnchor.x - pu.x) * 0.65;
+        pu.dy += (userAnchor.y - pu.y) * 0.65;
+      }
+    }
+
+    const cx = width / 2;
+    const cy = height * 0.5;
+    for (const n of safeNodes) {
+      if (firstUser && n.id === firstUser.id) continue;
+      const p = getP(n.id);
+      if (!p) continue;
+      p.dx += (cx - p.x) * 0.024;
+      p.dy += (cy - p.y) * 0.024;
+    }
+
+    for (const n of safeNodes) {
+      const p = getP(n.id);
+      if (!p) continue;
+      const mag = Math.hypot(p.dx, p.dy) || 0;
+      const lim = temperature * 18;
+      const s = mag > lim ? lim / mag : 1;
+      p.x += p.dx * s * 0.045;
+      p.y += p.dy * s * 0.045;
+      p.x = Math.min(width - pad, Math.max(pad, p.x));
+      p.y = Math.min(height - pad - 58, Math.max(pad + 32, p.y));
+    }
+  }
+
+  if (firstUser) {
+    const pu = getP(firstUser.id);
+    if (pu) {
+      pu.x = userAnchor.x;
+      pu.y = userAnchor.y;
+    }
+  }
+
+  const positions = new Map<string, MemoryGraphPoint>();
+  for (const n of safeNodes) {
+    const p = getP(n.id);
+    if (p) {
+      positions.set(n.id, { x: p.x, y: p.y });
+    }
+  }
 
   const positionedNodes = safeNodes
     .filter((node) => positions.has(node.id))
@@ -204,6 +332,33 @@ function buildMemoryGraphLayout(
     positionedNodes,
     positionedEdges,
   };
+}
+
+/** Curved directed edge with a slight perpendicular lift so bundles read as separate arcs. */
+function memoryGraphEdgePath(
+  from: MemoryGraphPoint,
+  to: MemoryGraphPoint,
+  edgeIndex: number,
+  endTrim = 24,
+): string {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.max(8, Math.hypot(dx, dy));
+  const ux = dx / len;
+  const uy = dy / len;
+  const trim = Math.min(endTrim, len * 0.32);
+  const ax = from.x + ux * trim;
+  const ay = from.y + uy * trim;
+  const bx = to.x - ux * trim;
+  const by = to.y - uy * trim;
+  const span = Math.max(6, Math.hypot(bx - ax, by - ay));
+  const nx = -(by - ay) / span;
+  const ny = (bx - ax) / span;
+  const side = edgeIndex % 2 === 0 ? 1 : -1;
+  const lift = 26 + (edgeIndex % 5) * 4;
+  const mx = (ax + bx) / 2 + nx * lift * side;
+  const my = (ay + by) / 2 + ny * lift * side;
+  return `M ${ax} ${ay} Q ${mx} ${my} ${bx} ${by}`;
 }
 
 function renderInlineCitations(text: string, keyPrefix: string): React.ReactNode[] {
@@ -1842,60 +1997,121 @@ export default function Chat() {
               </div>
 
               {memoryGraph.isLoading ? (
-                <div className="h-[430px] border rounded-lg flex items-center justify-center gap-2 text-sm text-muted-foreground bg-muted/30">
+                <div className="h-[430px] rounded-xl border border-border/60 bg-muted/15 backdrop-blur-sm flex items-center justify-center gap-2 text-sm text-muted-foreground shadow-inner">
                   <Loader2 className="h-4 w-4 animate-spin" /> Loading memory graph...
                 </div>
               ) : memoryGraph.isError ? (
-                <div className="h-[430px] border rounded-lg flex items-center justify-center text-sm text-destructive bg-destructive/5">
+                <div className="h-[430px] rounded-xl border border-destructive/25 bg-destructive/[0.06] flex items-center justify-center text-sm text-destructive">
                   Could not load memory graph.
                 </div>
               ) : (memoryGraph.data?.nodes.length ?? 0) <= 1 ? (
-                <div className="h-[430px] border rounded-lg flex items-center justify-center text-sm text-muted-foreground bg-muted/20">
-                  No user memory found yet. Continue chatting to build memory.
+                <div className="h-[430px] rounded-xl border border-dashed border-border/70 bg-muted/10 backdrop-blur-sm flex flex-col items-center justify-center gap-1 px-6 text-center text-sm text-muted-foreground">
+                  <span>No user memory found yet.</span>
+                  <span className="text-xs text-muted-foreground/80">Continue chatting to build memory.</span>
                 </div>
               ) : (
-                <div className="overflow-x-auto rounded-lg border bg-gradient-to-b from-slate-50/80 to-slate-100/80">
+                <div className="overflow-x-auto rounded-xl border border-border/50 bg-muted/20 shadow-[inset_0_1px_0_0_hsl(var(--border)_/_0.35)] dark:bg-muted/10 dark:shadow-[inset_0_1px_0_0_hsl(var(--border)_/_0.25)]">
                   <div
-                    className="relative h-[430px] min-w-[980px]"
+                    className="relative isolate h-[430px] min-w-[980px] bg-[radial-gradient(ellipse_75%_55%_at_50%_28%,hsl(var(--primary)/0.07)_0%,transparent_60%),radial-gradient(hsl(var(--muted-foreground)/0.09)_1px,transparent_1px)] [background-size:auto,22px_22px] [background-position:center,-1px_-1px]"
                     style={{ width: `${memoryLayout.width}px` }}
                   >
+                    <div
+                      className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_55%_45%_at_50%_72%,hsl(var(--ring)/0.09)_0%,transparent_65%)]"
+                      aria-hidden
+                    />
                     <svg
-                      className="absolute inset-0 h-full w-full"
+                      className="pointer-events-none absolute inset-0 h-full w-full overflow-visible [&_path]:will-change-[stroke-opacity]"
                       viewBox={`0 0 ${memoryLayout.width} ${memoryLayout.height}`}
+                      aria-hidden
                     >
-                      {memoryLayout.positionedEdges.map((edge, idx) => (
-                        <line
-                          key={`${edge.source}-${edge.target}-${idx}`}
-                          x1={edge.from.x}
-                          y1={edge.from.y}
-                          x2={edge.to.x}
-                          y2={edge.to.y}
-                          stroke={edge.type === "remembers" ? "#1d4ed8" : "#64748b"}
-                          strokeOpacity={edge.type === "remembers" ? 0.5 : 0.35}
-                          strokeWidth={edge.type === "remembers" ? 2 : 1.5}
-                        />
-                      ))}
+                      <defs>
+                        <marker
+                          id="memory-graph-arrow"
+                          markerUnits="strokeWidth"
+                          markerWidth="5.5"
+                          markerHeight="5.5"
+                          refX="10"
+                          refY="5.5"
+                          orient="auto"
+                          viewBox="0 0 10 11"
+                        >
+                          <path d="M0 0 L10 5.5 L0 11 Z" fill="hsl(var(--muted-foreground))" fillOpacity={0.55} />
+                        </marker>
+                        <marker
+                          id="memory-graph-arrow-primary"
+                          markerUnits="strokeWidth"
+                          markerWidth="5.5"
+                          markerHeight="5.5"
+                          refX="10"
+                          refY="5.5"
+                          orient="auto"
+                          viewBox="0 0 10 11"
+                        >
+                          <path d="M0 0 L10 5.5 L0 11 Z" fill="hsl(var(--primary))" fillOpacity={0.75} />
+                        </marker>
+                        <filter id="memory-graph-edge-glow" x="-40%" y="-40%" width="180%" height="180%">
+                          <feGaussianBlur stdDeviation="1.2" result="b" />
+                          <feMerge>
+                            <feMergeNode in="b" />
+                            <feMergeNode in="SourceGraphic" />
+                          </feMerge>
+                        </filter>
+                      </defs>
+                      {memoryLayout.positionedEdges.map((edge, idx) => {
+                        const isPrimary = edge.type === "remembers";
+                        return (
+                          <path
+                            key={`${edge.source}-${edge.target}-${idx}`}
+                            d={memoryGraphEdgePath(edge.from, edge.to, idx)}
+                            fill="none"
+                            stroke={isPrimary ? "hsl(var(--primary))" : "hsl(var(--muted-foreground))"}
+                            strokeOpacity={isPrimary ? 0.42 : 0.22}
+                            strokeWidth={isPrimary ? 2.1 : 1.35}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            markerEnd={`url(#${isPrimary ? "memory-graph-arrow-primary" : "memory-graph-arrow"})`}
+                            filter={isPrimary ? "url(#memory-graph-edge-glow)" : undefined}
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        );
+                      })}
                     </svg>
 
-                    {memoryLayout.positionedNodes.map((node) => (
-                      <div
-                        key={node.id}
-                        className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border px-3 py-2 text-xs shadow-sm max-w-[220px] text-center ${
-                          node.type === "user"
-                            ? "bg-blue-600 text-white border-blue-500"
-                            : node.type === "memory"
-                              ? "bg-white text-slate-900 border-slate-300"
-                              : "bg-amber-50 text-amber-900 border-amber-200"
-                        }`}
-                        style={{ left: `${node.position.x}px`, top: `${node.position.y}px` }}
-                        title={node.label}
-                      >
-                        <div className="font-medium mb-0.5">
-                          {node.type === "user" ? "User" : node.type === "memory" ? "Memory" : "Concept"}
+                    {memoryLayout.positionedNodes.map((node) => {
+                      const Icon = node.type === "user" ? User : node.type === "memory" ? Brain : Lightbulb;
+                      return (
+                        <div
+                          key={node.id}
+                          className="absolute z-[1]"
+                          style={{ left: `${node.position.x}px`, top: `${node.position.y}px` }}
+                          title={node.label}
+                        >
+                          <div className="relative">
+                            <div
+                              className={cn(
+                                "absolute left-1/2 top-1/2 flex h-[44px] w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 shadow-[0_10px_30px_-12px_hsl(var(--foreground)/0.45)] ring-2 ring-background/90 transition-transform duration-200 ease-out hover:z-[2] hover:scale-[1.06] hover:shadow-[0_14px_36px_-14px_hsl(var(--foreground)/0.55)]",
+                                node.type === "user" &&
+                                  "border-primary/40 bg-gradient-to-br from-primary to-primary/85 text-primary-foreground",
+                                node.type === "memory" &&
+                                  "border-border/80 bg-gradient-to-br from-background to-muted/90 text-foreground dark:from-background dark:to-muted/70",
+                                node.type === "concept" &&
+                                  "border-secondary/70 bg-gradient-to-br from-secondary to-secondary/80 text-secondary-foreground",
+                              )}
+                            >
+                              <Icon className="h-[18px] w-[18px] shrink-0 opacity-95" strokeWidth={2} aria-hidden />
+                            </div>
+                            <div className="absolute left-1/2 top-[calc(50%+30px)] w-[min(168px,calc(100vw-6rem))] -translate-x-1/2 text-center">
+                              <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                                {node.type === "user" ? "You" : node.type === "memory" ? "Memory" : "Concept"}
+                              </div>
+                              <div className="mt-0.5 line-clamp-2 text-[11px] font-medium leading-snug text-foreground drop-shadow-sm">
+                                {node.label}
+                              </div>
+                            </div>
+                          </div>
                         </div>
-                        <div className="line-clamp-2">{node.label}</div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

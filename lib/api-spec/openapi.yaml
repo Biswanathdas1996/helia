@@ -376,6 +376,24 @@ paths:
               schema:
                 $ref: "#/components/schemas/Ticket"
 
+  /tickets/zoho-synced:
+    get:
+      operationId: listZohoSyncedTickets
+      summary: List tickets synced to Zoho Desk
+      description: Admin only. Returns local ticket rows whose externalId references Zoho Desk.
+      tags: [tickets]
+      responses:
+        "200":
+          description: Tickets linked to Zoho
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Ticket"
+        "403":
+          description: Forbidden
+
   /tickets/{id}:
     get:
       operationId: getTicket

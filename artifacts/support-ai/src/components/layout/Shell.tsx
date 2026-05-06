@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListConversationsQueryKey, useGetMe } from "@workspace/api-client-react";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, MessageSquare, Ticket as TicketIcon, LogOut, Loader2, FileText, UploadCloud, Trash2 } from "lucide-react";
+import { LayoutDashboard, MessageSquare, Ticket as TicketIcon, LogOut, Loader2, FileText, UploadCloud, Trash2, Globe } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { PwcWordmark } from "@/components/layout/PwcWordmark";
@@ -37,6 +37,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     { href: "/admin/documents", label: "Documents", icon: FileText },
     { href: "/admin/documents/new", label: "Upload Document", icon: UploadCloud },
     { href: "/admin/tickets", label: "Admin Tickets", icon: TicketIcon },
+    { href: "/admin/zoho-tickets", label: "Zoho tickets", icon: Globe },
   ] : [];
 
   const handleClearMemory = async () => {

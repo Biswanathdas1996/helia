@@ -444,6 +444,27 @@ export const CreateTicketBody = zod.object({
   relatedMessageId: zod.number().optional(),
 });
 
+/**
+ * Admin only. Returns local ticket rows whose externalId references Zoho Desk.
+ * @summary List tickets synced to Zoho Desk
+ */
+export const ListZohoSyncedTicketsResponseItem = zod.object({
+  id: zod.number(),
+  subject: zod.string(),
+  description: zod.string(),
+  priority: zod.enum(["low", "medium", "high", "urgent"]),
+  status: zod.enum(["open", "in_progress", "resolved", "closed"]),
+  externalId: zod.string().nullish(),
+  createdBy: zod.string(),
+  relatedMessageId: zod.number().nullish(),
+  lastUpdate: zod.string().nullish(),
+  createdAt: zod.string(),
+  updatedAt: zod.string(),
+});
+export const ListZohoSyncedTicketsResponse = zod.array(
+  ListZohoSyncedTicketsResponseItem,
+);
+
 export const GetTicketParams = zod.object({
   id: zod.coerce.number(),
 });

@@ -1678,6 +1678,82 @@ export const useCreateTicket = <
   return useMutation(getCreateTicketMutationOptions(options));
 };
 
+/**
+ * Admin only. Returns local ticket rows whose externalId references Zoho Desk.
+ * @summary List tickets synced to Zoho Desk
+ */
+export const getListZohoSyncedTicketsUrl = () => {
+  return `/api/tickets/zoho-synced`;
+};
+
+export const listZohoSyncedTickets = async (
+  options?: RequestInit,
+): Promise<Ticket[]> => {
+  return customFetch<Ticket[]>(getListZohoSyncedTicketsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListZohoSyncedTicketsQueryKey = () => {
+  return [`/api/tickets/zoho-synced`] as const;
+};
+
+export const getListZohoSyncedTicketsQueryOptions = <
+  TData = Awaited<ReturnType<typeof listZohoSyncedTickets>>,
+  TError = ErrorType<void>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listZohoSyncedTickets>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListZohoSyncedTicketsQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listZohoSyncedTickets>>
+  > = ({ signal }) => listZohoSyncedTickets({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listZohoSyncedTickets>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListZohoSyncedTicketsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listZohoSyncedTickets>>
+>;
+export type ListZohoSyncedTicketsQueryError = ErrorType<void>;
+
+/**
+ * @summary List tickets synced to Zoho Desk
+ */
+
+export function useListZohoSyncedTickets<
+  TData = Awaited<ReturnType<typeof listZohoSyncedTickets>>,
+  TError = ErrorType<void>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listZohoSyncedTickets>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListZohoSyncedTicketsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
 export const getGetTicketUrl = (id: number) => {
   return `/api/tickets/${id}`;
 };

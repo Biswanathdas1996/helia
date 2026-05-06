@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app import zoho
 from app.audit import audit_log
-from app.auth import AuthedUser, require_auth
+from app.auth import AuthedUser, require_admin, require_auth
 from app.db import get_db, next_id
 from app.schemas import CreateTicketBody, UpdateTicketBody
 from app.serialize import serialize_ticket
@@ -36,19 +36,33 @@ async def list_tickets(user: AuthedUser = Depends(require_auth)) -> list[dict[st
     return [serialize_ticket(r) for r in rows]
 
 
+@router.get("/tickets/zoho-synced")
+async def list_zoho_synced_tickets(_admin: AuthedUser = Depends(require_admin)) -> list[dict[str, object]]:
+    """Tickets that have a Zoho Desk backing id (``externalId`` starts with ``zoho:``)."""
+    db = await get_db()
+    rows = (
+        await db.tickets.find({"externalId": {"$regex": r"^zoho:"}})
+        .sort("createdAt", -1)
+        .to_list(length=None)
+    )
+    return [serialize_ticket(r) for r in rows]
+
+
 @router.get("/tickets/active-summary")
 async def active_summary(user: AuthedUser = Depends(require_auth)) -> dict[str, object]:
     """Proactive open-ticket banner data for the chat sidebar.
 
     Refreshes Zoho-side status for the user's open tickets so the UI shows
-    the latest update without the user having to navigate away.
+    the latest update without the user having to navigate away. Uses Desk
+    REST when OAuth is configured, otherwise the Zoho Desk MCP ``get_ticket``
+    tool when MCP is enabled.
     """
     db = await get_db()
     rows = await db.tickets.find(
         {"userId": user.userId, "status": {"$in": ["open", "in_progress"]}}
     ).sort("updatedAt", -1).to_list(length=10)
 
-    if zoho.is_configured():
+    if zoho.is_configured() or zoho.mcp_transport_configured():
         for r in rows:
             ext = r.get("externalId")
             if not ext or not str(ext).startswith("zoho:"):
@@ -94,9 +108,9 @@ async def create_ticket(
     now = datetime.now(timezone.utc)
 
     external_id = f"HEL-{random.randint(10000, 99999)}"
-    if zoho.is_configured():
+    if zoho.mcp_transport_configured() or zoho.is_configured():
         try:
-            resp = await zoho.create_ticket(
+            resp = await zoho.create_desk_ticket(
                 subject=body.subject,
                 description=body.description,
                 priority=body.priority,
@@ -106,7 +120,7 @@ async def create_ticket(
             if resp and resp.get("id"):
                 external_id = f"zoho:{resp['id']}"
         except Exception as err:
-            log.warning("zoho create_ticket failed, keeping local id: %s", err)
+            log.warning("zoho create_desk_ticket failed, keeping local id: %s", err)
 
     t = {
         "_id": await next_id("tickets"),

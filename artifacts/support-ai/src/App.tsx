@@ -21,6 +21,7 @@ import AdminDocuments from "@/pages/admin/Documents";
 import AdminDocumentDetail from "@/pages/admin/DocumentDetail";
 import AdminNewDocument from "@/pages/admin/NewDocument";
 import AdminTickets from "@/pages/admin/Tickets";
+import AdminZohoTickets from "@/pages/admin/ZohoTickets";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const queryClient = new QueryClient();
@@ -60,6 +61,7 @@ function ProtectedAdmin() {
         <Route path="/admin/documents" component={AdminDocuments} />
         <Route path="/admin/documents/new" component={AdminNewDocument} />
         <Route path="/admin/documents/:id" component={AdminDocumentDetail} />
+        <Route path="/admin/zoho-tickets" component={AdminZohoTickets} />
         <Route path="/admin/tickets" component={AdminTickets} />
       </Switch>
     </AdminGuard>

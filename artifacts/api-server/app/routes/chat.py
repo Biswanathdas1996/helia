@@ -37,7 +37,7 @@ _TICKET_INTENT_PATTERNS = [
 _TICKET_INTENT_RESPONSE = (
     "Of course — I can help you open a support ticket so a human teammate can follow up. "
     "Reply \"yes, create a ticket\" and I will create it with a summary of this investigation, "
-    "or tap the **Create Ticket** button below."
+    "Thanks for contacting us."
 )
 _LIST_TICKETS_INTENT_PATTERNS = [
     re.compile(r"\b(view|show|see|list|display|fetch|get|check|pull\s*up|bring\s*up)\b[^.\n]{0,40}\b(my\s+)?(support\s+|open\s+)?tickets?\b", re.IGNORECASE),
@@ -1423,19 +1423,23 @@ async def _create_ticket_from_conversation(
 
     now = datetime.now(timezone.utc)
     external_id = f"HEL-{random.randint(10000, 99999)}"
-    if zoho.is_configured():
-        try:
-            resp = await zoho.create_ticket(
-                subject=subject,
-                description=description,
-                priority=priority,
-                requester_email=user.email,
-                requester_name=" ".join(filter(None, [user.firstName, user.lastName])).strip() or user.email,
+    try:
+        resp = await zoho.create_desk_ticket(
+            subject=subject,
+            description=description,
+            priority=priority,
+            requester_email=user.email,
+            requester_name=" ".join(filter(None, [user.firstName, user.lastName])).strip() or user.email,
+            category="Chat",
+        )
+        if resp and resp.get("id"):
+            external_id = f"zoho:{resp['id']}"
+            log.info(
+                "chat agent ticket synced to Zoho Desk: local will use external_id=%s",
+                external_id,
             )
-            if resp and resp.get("id"):
-                external_id = f"zoho:{resp['id']}"
-        except Exception as err:
-            log.warning("chat escalation create_ticket failed on zoho, keeping local id: %s", err)
+    except Exception as err:
+        log.warning("chat escalation create_desk_ticket failed on zoho, keeping local id: %s", err)
 
     ticket = {
         "_id": await next_id("tickets"),
