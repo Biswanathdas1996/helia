@@ -17,6 +17,7 @@ import httpx
 BASE_URL = "https://genai-sharedservice-americas.pwc.com"
 CHAT_MODEL = "azure.grok-4-fast-reasoning"
 EMBEDDING_MODEL = "vertex_ai.gemini-embedding"
+IMAGE_MODEL = "vertex_ai.gemini-2.5-flash-image"
 log = logging.getLogger("api-server.pwc_ai")
 
 
@@ -287,3 +288,52 @@ async def extract_text_from_base64(mime_type: str, base64_data: str, filename: s
         raise RuntimeError(f"PwC AI extraction error {res.status_code}: {res.text[:300]}")
     data = res.json()
     return (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+
+
+async def describe_image_for_chat(mime_type: str, base64_data: str) -> str:
+    """Describe an image using the vision model for use as chat context.
+
+    Returns a plain-text description of what is visible in the image so the
+    support agent can understand the user's issue without seeing the image
+    directly.
+    """
+    body: dict[str, Any] = {
+        "model": IMAGE_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are a support assistant analyzing a screenshot or image shared by a user. "
+                            "Describe everything relevant to diagnosing the issue: all visible text "
+                            "(especially error messages, dialog boxes, notifications, status bars), UI "
+                            "elements, highlighted areas, and the overall context shown. Be detailed and "
+                            "specific. Output plain text only — no markdown."
+                        ),
+                    },
+                ],
+            },
+        ],
+        "max_tokens": 1000,
+        "temperature": 0.1,
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        res = await client.post(f"{BASE_URL}/chat/completions", headers=_headers(), json=body)
+    if res.status_code >= 400:
+        raise RuntimeError(f"PwC AI image describe error {res.status_code}: {res.text[:500]}")
+    data = res.json()
+    content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    # Gemini may return content as a list of typed parts ([{type:"text", text:"..."}]).
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return content.strip()

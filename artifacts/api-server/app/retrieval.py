@@ -34,8 +34,10 @@ _RRF_K = 60
 _DEDUP_JACCARD = 0.85
 _BM25_LIMIT = 12
 _VECTOR_LIMIT = 12
-_RERANK_LIMIT = 8
-_FINAL_K = 5
+_RERANK_LIMIT = 12
+_FINAL_K = 8
+_MAX_QUERIES = 4
+_PER_DOC_CAP = 3
 
 
 @dataclass
@@ -85,6 +87,8 @@ async def retrieve(
     tenant_id: str | None = None,
     pre_rewritten: str | None = None,
     pre_intent: str | None = None,
+    pre_subqueries: list[str] | None = None,
+    pre_keywords: list[str] | None = None,
 ) -> RetrievalResult:
     if pre_rewritten:
         rewritten, intent = pre_rewritten, (pre_intent or "general")
@@ -103,15 +107,32 @@ async def retrieve(
     if not approved_ids:
         return RetrievalResult(rewritten_query=search_query, intent=intent, chunks=[])
 
-    bm25_hits, vector_hits = await _hybrid_search(db, search_query, approved_ids, tenant_id=tenant_id)
-    fused = _reciprocal_rank_fusion(bm25_hits, vector_hits)
+    queries = _build_query_set(
+        search_query,
+        raw_query=query,
+        subqueries=pre_subqueries,
+        keywords=pre_keywords,
+    )
+
+    bm25_lists: list[list[dict]] = []
+    vector_lists: list[list[dict]] = []
+    for q in queries:
+        bm25_hits, vector_hits = await _hybrid_search(
+            db, q, approved_ids, tenant_id=tenant_id
+        )
+        if bm25_hits:
+            bm25_lists.append(bm25_hits)
+        if vector_hits:
+            vector_lists.append(vector_hits)
+
+    fused = _reciprocal_rank_fusion(*bm25_lists, *vector_lists)
     deduped = _dedup_by_jaccard(fused)
     top = deduped[:_RERANK_LIMIT]
     # Prefer Cohere/cross-encoder reranker if configured; fall back to LLM rerank.
     reranked = await _external_rerank(search_query, top)
     if reranked is None:
         reranked = await _llm_rerank(search_query, top)
-    final = reranked[:_FINAL_K]
+    final = _diversify_by_document(reranked, _FINAL_K, _PER_DOC_CAP)
 
     return RetrievalResult(
         rewritten_query=search_query,
@@ -132,6 +153,34 @@ async def retrieve(
             for c in final
         ],
     )
+
+
+def _diversify_by_document(rows: list[dict], final_k: int, per_doc_cap: int) -> list[dict]:
+    """Cap chunks per document while preserving rerank order, so one large
+    document (e.g. an imported ticket history) cannot occupy every citation
+    slot. Overflow chunks are appended at the end so we still fall back to
+    them if other documents do not produce enough hits.
+    """
+    if final_k <= 0 or per_doc_cap <= 0:
+        return rows[:final_k]
+    primary: list[dict] = []
+    overflow: list[dict] = []
+    counts: dict[int, int] = {}
+    for row in rows:
+        doc_id = row.get("documentId")
+        if not isinstance(doc_id, int):
+            primary.append(row)
+            continue
+        if counts.get(doc_id, 0) < per_doc_cap:
+            primary.append(row)
+            counts[doc_id] = counts.get(doc_id, 0) + 1
+        else:
+            overflow.append(row)
+        if len(primary) >= final_k:
+            break
+    if len(primary) < final_k:
+        primary.extend(overflow[: final_k - len(primary)])
+    return primary[:final_k]
 
 
 def _chunk_metadata(row: dict, doc: dict[str, object] | None) -> dict[str, object]:
@@ -174,6 +223,52 @@ def _chunk_metadata(row: dict, doc: dict[str, object] | None) -> dict[str, objec
         if k not in metadata:
             metadata[k] = v
     return metadata
+
+
+def _build_query_set(
+    primary: str,
+    *,
+    raw_query: str,
+    subqueries: list[str] | None,
+    keywords: list[str] | None,
+) -> list[str]:
+    """Build a deduped, length-bounded set of search queries to run in parallel.
+
+    The primary rewrite always goes first. Sub-queries (alternative phrasings of
+    the same intent) are added next. Finally, a single keyword-joined query is
+    appended so BM25 can match on bag-of-keywords even when phrasings differ.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def push(value: str) -> None:
+        norm = " ".join((value or "").split()).strip()
+        if not norm:
+            return
+        key = norm.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(norm)
+
+    push(primary or raw_query)
+
+    if subqueries:
+        for sq in subqueries:
+            if isinstance(sq, str):
+                push(sq)
+            if len(out) >= _MAX_QUERIES:
+                break
+
+    if keywords and len(out) < _MAX_QUERIES:
+        kw = [str(k).strip() for k in keywords if isinstance(k, str) and str(k).strip()]
+        if kw:
+            push(" ".join(kw[:8]))
+
+    if not out:
+        push(raw_query)
+
+    return out[:_MAX_QUERIES]
 
 
 # ---------------------------------------------------------------------------

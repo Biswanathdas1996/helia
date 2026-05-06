@@ -33,6 +33,7 @@ class CreateConversationBody(BaseModel):
 
 class SendMessageBody(BaseModel):
     content: str = Field(min_length=1)
+    imageDataUrl: Optional[str] = Field(default=None, max_length=20_000_000)
 
 
 class RateMessageBody(BaseModel):

@@ -146,6 +146,11 @@ async def embed(texts: Iterable[str]) -> list[list[float]]:
     return await pwc_ai.embed(items)
 
 
+async def describe_image_for_chat(mime_type: str, base64_data: str) -> str:
+    """Describe an image using the vision model so it can be used as chat context."""
+    return await pwc_ai.describe_image_for_chat(mime_type, base64_data)
+
+
 # ---------------------------------------------------------------------------
 # SSE
 # ---------------------------------------------------------------------------

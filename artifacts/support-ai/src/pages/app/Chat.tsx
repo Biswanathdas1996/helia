@@ -31,7 +31,9 @@ import {
   AlertTriangle,
   History,
   ChevronRight,
-  Trash2
+  Trash2,
+  Paperclip,
+  X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -374,8 +376,15 @@ type StreamingMessage = {
   citations: ChatCitation[];
   rating?: "up" | "down" | null;
   canAnswer?: boolean | null;
+  imageDataUrl?: string | null;
   createdAt: string;
 };
+
+const IMAGE_CONTEXT_RE = /^\[Image context:[\s\S]*?\]\s*\n*/;
+
+function stripImageContext(content: string): string {
+  return content.replace(IMAGE_CONTEXT_RE, "").trim();
+}
 
 type ChatCitation = {
   chunkId: number;
@@ -557,6 +566,11 @@ export default function Chat() {
   });
 
   const [input, setInput] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
+  const [isDescribingImage, setIsDescribingImage] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [isConversationsOpen, setIsConversationsOpen] = useState(true);
   const [memoryGraphOpen, setMemoryGraphOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -616,7 +630,7 @@ export default function Chat() {
   }, []);
 
   const streamMessage = useCallback(
-    async (convoId: number, content: string) => {
+    async (convoId: number, content: string, imageDataUrl?: string | null) => {
       const controller = new AbortController();
       abortControllerRef.current?.abort();
       abortControllerRef.current = controller;
@@ -633,7 +647,7 @@ export default function Chat() {
             method: "POST",
             credentials: "include",
             headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({ content, imageDataUrl: imageDataUrl ?? null }),
             signal: controller.signal,
           },
         );
@@ -738,12 +752,77 @@ export default function Chat() {
     [queryClient, toast],
   );
 
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    if (!file) return;
+    setImageFile(file);
+    const url = URL.createObjectURL(file);
+    setImagePreviewUrl(url);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === "string") {
+        setImageDataUrl(result);
+      }
+    };
+    reader.readAsDataURL(file);
+    // Reset so the same file can be re-selected
+    e.target.value = "";
+  };
+
+  const clearImage = () => {
+    setImageFile(null);
+    setImageDataUrl(null);
+    if (imagePreviewUrl) {
+      URL.revokeObjectURL(imagePreviewUrl);
+      setImagePreviewUrl(null);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isStreaming) return;
+    if ((!input.trim() && !imageFile) || isStreaming) return;
 
-    const content = input;
+    let content = input;
     setInput("");
+    const pendingImage = imageFile;
+    const pendingImageDataUrl = imageDataUrl;
+    clearImage();
+
+    // If an image was attached, describe it first and prepend the description
+    if (pendingImage) {
+      setIsDescribingImage(true);
+      try {
+        const formData = new FormData();
+        formData.append("file", pendingImage);
+        const res = await fetch("/api/chat/image-describe", {
+          method: "POST",
+          credentials: "include",
+          body: formData,
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body?.detail ?? "Image description failed");
+        }
+        const { description } = (await res.json()) as { description: string };
+        if (description) {
+          content = content.trim()
+            ? `[Image context: ${description}]\n\n${content.trim()}`
+            : `[Image context: ${description}]`;
+        }
+      } catch (err) {
+        toast({
+          title: "Image could not be described",
+          description: (err as Error).message,
+          variant: "destructive",
+        });
+        return;
+      } finally {
+        setIsDescribingImage(false);
+      }
+    }
+
+    if (!content.trim()) return;
 
     let convoId = currentId;
     if (!convoId) {
@@ -758,7 +837,7 @@ export default function Chat() {
       }
     }
 
-    await streamMessage(convoId, content);
+    await streamMessage(convoId, content, pendingImageDataUrl);
   };
 
   const handleRate = async (messageId: number, rating: "up" | "down") => {
@@ -1208,8 +1287,19 @@ export default function Chat() {
                     ))}
                   </div>
                 ) : (
-                  <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
-                    <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+                  <div className="flex flex-col items-end gap-2">
+                    {(msg as { imageDataUrl?: string | null }).imageDataUrl && (
+                      <img
+                        src={(msg as { imageDataUrl?: string | null }).imageDataUrl as string}
+                        alt="Attached image"
+                        className="max-h-56 max-w-xs rounded-2xl border border-border object-cover shadow-sm"
+                      />
+                    )}
+                    {stripImageContext(msg.content) && (
+                      <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
+                        <div className="whitespace-pre-wrap leading-relaxed">{stripImageContext(msg.content)}</div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1299,9 +1389,18 @@ export default function Chat() {
           {streamingUserMessage && (
             <div className="flex gap-4 max-w-4xl mx-auto justify-end">
               <div className="flex flex-col gap-2 max-w-[80%] items-end">
-                <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
-                  <div className="whitespace-pre-wrap leading-relaxed">{streamingUserMessage.content}</div>
-                </div>
+                {streamingUserMessage.imageDataUrl && (
+                  <img
+                    src={streamingUserMessage.imageDataUrl}
+                    alt="Attached image"
+                    className="max-h-56 max-w-xs rounded-2xl border border-border object-cover shadow-sm"
+                  />
+                )}
+                {stripImageContext(streamingUserMessage.content) && (
+                  <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
+                    <div className="whitespace-pre-wrap leading-relaxed">{stripImageContext(streamingUserMessage.content)}</div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1405,23 +1504,60 @@ export default function Chat() {
         </div>
 
         <div className="p-4 bg-background border-t border-border">
-          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto relative flex items-center">
-            <Input
-              id="chat-input"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Describe the issue. I will investigate and ask follow-ups only when needed..."
-              className="pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
-              autoComplete="off"
-            />
-            <Button 
-              type="submit" 
-              size="icon" 
-              disabled={!input.trim() || isStreaming || createConvo.isPending}
-              className="absolute right-2 h-10 w-10 rounded-lg"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
+          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex flex-col gap-2">
+            {imagePreviewUrl && (
+              <div className="relative inline-flex self-start">
+                <img
+                  src={imagePreviewUrl}
+                  alt="Attached image preview"
+                  className="h-20 w-auto max-w-[160px] rounded-lg border border-border object-cover shadow-sm"
+                />
+                <button
+                  type="button"
+                  onClick={clearImage}
+                  className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow"
+                  aria-label="Remove image"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+            <div className="relative flex items-center">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                className="hidden"
+                onChange={handleImageChange}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                disabled={isStreaming || isDescribingImage}
+                className="absolute left-2 h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
+                aria-label="Attach image"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {isDescribingImage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+              </Button>
+              <Input
+                id="chat-input"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Describe the issue. I will investigate and ask follow-ups only when needed..."
+                className="pl-11 pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
+                autoComplete="off"
+              />
+              <Button
+                type="submit"
+                size="icon"
+                disabled={(!input.trim() && !imageFile) || isStreaming || isDescribingImage || createConvo.isPending}
+                className="absolute right-2 h-10 w-10 rounded-lg"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
           </form>
           <div className="text-center mt-2 text-[11px] text-muted-foreground">
             Helia AI can make mistakes. Consider verifying important information.

@@ -29,6 +29,21 @@ export default function TicketDetail() {
     query: { enabled: !!id, queryKey: getGetTicketQueryKey(id) }
   });
 
+  const relatedConversationMatch = ticket?.description.match(/\bConversation ID:\s*(\d+)\b/i);
+  const relatedConversationId = relatedConversationMatch
+    ? Number.parseInt(relatedConversationMatch[1], 10)
+    : null;
+
+  const { data: relatedConversation, isLoading: loadingRelatedConversation } = useGetConversation(
+    relatedConversationId as number,
+    {
+      query: {
+        enabled: Boolean(relatedConversationId),
+        queryKey: getGetConversationQueryKey(relatedConversationId as number),
+      },
+    },
+  );
+
   const updateTicket = useUpdateTicket();
 
   const handleStatusChange = async (status: string) => {
@@ -49,20 +64,6 @@ export default function TicketDetail() {
   if (!ticket) return <div className="p-8">Ticket not found</div>;
 
   const isAdmin = me?.role === "admin";
-  const relatedConversationMatch = ticket.description.match(/\bConversation ID:\s*(\d+)\b/i);
-  const relatedConversationId = relatedConversationMatch
-    ? Number.parseInt(relatedConversationMatch[1], 10)
-    : null;
-
-  const { data: relatedConversation, isLoading: loadingRelatedConversation } = useGetConversation(
-    relatedConversationId as number,
-    {
-      query: {
-        enabled: Boolean(relatedConversationId),
-        queryKey: getGetConversationQueryKey(relatedConversationId as number),
-      },
-    },
-  );
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
