@@ -1,6 +1,7 @@
 type Variant = "light" | "dark";
 
 const WORDMARK_DARK_SRC = "/pwc-wordmark-dark.png";
+const WORDMARK_LIGHT_SRC = "/pwc-wordmark-light.png";
 
 export function PwcWordmark({
   variant = "light",
@@ -14,7 +15,6 @@ export function PwcWordmark({
   /** `stacked`: partner logo above product name (e.g. sidebar lockup). */
   layout?: "inline" | "stacked";
 }) {
-  const text = variant === "dark" ? "text-white" : "text-foreground";
   const sub = variant === "dark" ? "text-white/70" : "text-muted-foreground";
   const wordSize = size === "sm" ? "text-base" : size === "lg" ? "text-2xl" : "text-lg";
 
@@ -64,40 +64,19 @@ export function PwcWordmark({
     );
   }
 
-  const bar =
-    size === "sm"
-      ? {
-          first: "h-[5px] w-[11px]",
-          second: "h-[6px] w-[11px]",
-          gap: "gap-px",
-          lift: "-translate-y-px",
-        }
-      : size === "lg"
-        ? {
-            first: "h-[8px] w-[17px]",
-            second: "h-[10px] w-[17px]",
-            gap: "gap-0.5",
-            lift: "-translate-y-1",
-          }
-        : {
-            first: "h-[6px] w-[13px]",
-            second: "h-[8px] w-[13px]",
-            gap: "gap-0.5",
-            lift: "-translate-y-0.5",
-          };
-
   return (
-    <div className="flex items-center gap-2.5">
-      <div className={`flex items-end ${bar.gap}`} aria-hidden>
-        <span className={`${bar.first} shrink-0 bg-[#EB8C00] -skew-x-[22deg]`} />
-        <span className={`${bar.second} shrink-0 bg-[#EB8C00] -skew-x-[22deg] ${bar.lift}`} />
-      </div>
-      <div className="flex items-baseline gap-2">
-        <span className={`${wordSize} font-serif font-bold tracking-tight leading-none ${text}`}>pwc</span>
-        {product ? (
-          <span className={`${wordSize} font-medium tracking-tight leading-none ${sub}`}>{product}</span>
-        ) : null}
-      </div>
+    <div className="flex min-w-0 items-center gap-2.5">
+      <img
+        src={WORDMARK_LIGHT_SRC}
+        alt="PwC"
+        decoding="async"
+        className={`${imgHeight} w-auto ${imgMaxWInline} shrink-0 object-contain object-left`}
+      />
+      {product ? (
+        <span className={`${wordSize} min-w-0 truncate font-medium tracking-tight leading-none ${sub}`}>
+          {product}
+        </span>
+      ) : null}
     </div>
   );
 }
