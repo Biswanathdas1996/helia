@@ -3,6 +3,8 @@ modules = ["nodejs-24", "python-3.12"]
 [deployment]
 router = "application"
 deploymentTarget = "autoscale"
+build = ["sh", "-c", "cd artifacts/api-server && pip install -e ."]
+run = ["sh", "-c", "cd artifacts/api-server && uvicorn app.server:app --host 0.0.0.0 --port 8080"]
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]
