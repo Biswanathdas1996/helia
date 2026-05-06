@@ -1,0 +1,97 @@
+026-05-06 11:10:23.36
+bc195bc5
+System
+metasidecar: loaded enterprise status from environment is_enterprise=false
+
+2026-05-06 11:10:23.36
+bc195bc5
+System
+starting artifact processes count=1
+2026-05-06 11:10:23.36
+bc195bc5
+System
+starting artifact process port=8080 artifact=artifacts/api-server args=[bash -lc cd /home/runner/workspace/artifacts/api-server && uvicorn app.server:app --host 0.0.0.0 --port 8080]
+2026-05-06 11:10:23.39
+bc195bc5
+System
+artifact process started artifact=artifacts/api-server pid=19
+2026-05-06 11:10:27.40
+bc195bc5
+User
+sys.exit(main())
+2026-05-06 11:10:27.40
+bc195bc5
+User
+^^^^^^
+2026-05-06 11:10:27.40
+bc195bc5
+User
+File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/click/core.py", line 1514, in __call__
+2026-05-06 11:10:27.40
+bc195bc5
+User
+File "/home/runner/workspace/.pythonlibs/bin/uvicorn", line 10, in <module>
+2026-05-06 11:10:27.40
+bc195bc5
+User
+File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/click/core.py", line 1435, in main
+2026-05-06 11:10:27.40
+bc195bc5
+User
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-05-06 11:10:27.40
+bc195bc5
+User
+return self.main(*args, **kwargs)
+2026-05-06 11:10:27.40
+bc195bc5
+User
+^^^^^^^^^^^^^^^^
+2026-05-06 11:10:27.40
+bc195bc5
+User
+File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/click/core.py", line 1298, in invoke
+2026-05-06 11:10:27.40
+bc195bc5
+User
+rv = self.invoke(ctx)
+2026-05-06 11:10:27.41
+bc195bc5
+User
+return ctx.invoke(self.callback, **ctx.params)
+2026-05-06 11:10:27.41
+bc195bc5
+User
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-05-06 11:10:27.41
+bc195bc5
+User
+File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/click/core.py", line 853, in invoke
+2026-05-06 11:10:27.41
+bc195bc5
+User
+self.loaded_app = import_from_string(self.app)
+2026-05-06 11:10:27.41
+bc195bc5
+User
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-05-06 11:10:27.41
+bc195bc5
+User
+File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+2026-05-06 11:10:27.41
+bc195bc5
+User
+File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+2026-05-06 11:11:23.36
+bc195bc5
+System
+seccomp port detection incomplete, trying /proc/net/tcp fallback seccompDetected=0 expected=[8080]
+2026-05-06 11:11:23.37
+bc195bc5
+System
+a port configuration was specified but the required port was never opened
+2026-05-06 11:11:23.37
+bc195bc5
+System
+not all artifact ports opened within timeout detected=0 expected=[8080]
