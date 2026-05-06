@@ -71,6 +71,7 @@ def serialize_message(m: dict[str, Any]) -> dict[str, Any]:
         "rewrittenQuery": m.get("rewrittenQuery"),
         "ticketId": m.get("ticketId"),
         "imageDataUrl": m.get("imageDataUrl"),
+        "finalVerdict": m.get("finalVerdict"),
         "createdAt": iso(m["createdAt"]),
     }
 

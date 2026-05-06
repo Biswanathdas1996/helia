@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import random
 import re
 import time
@@ -14,13 +13,13 @@ from typing import AsyncIterator
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app import agent_memory, cache, chat_agent, llm, metrics, rate_limit
+from app import agent_memory, cache, chat_agent, llm, metrics, query_rewrite, rate_limit
 from app.audit import audit_log
 from app.auth import AuthedUser, require_auth
 from app.db import get_db, next_id
 from app.retrieval import retrieve
 from app.schemas import CreateConversationBody, SendMessageBody
-from app.serialize import serialize_conversation, serialize_message
+from app.serialize import serialize_conversation, serialize_message, serialize_ticket
 from app.tenant import tenant_for
 from app import zoho
 
@@ -39,6 +38,21 @@ _TICKET_INTENT_RESPONSE = (
     "Of course — I can help you open a support ticket so a human teammate can follow up. "
     "Reply \"yes, create a ticket\" and I will create it with a summary of this investigation, "
     "or tap the **Create Ticket** button below."
+)
+_LIST_TICKETS_INTENT_PATTERNS = [
+    re.compile(r"\b(view|show|see|list|display|fetch|get|check|pull\s*up|bring\s*up)\b[^.\n]{0,40}\b(my\s+)?(support\s+|open\s+)?tickets?\b", re.IGNORECASE),
+    re.compile(r"\b(my|all)\s+(support\s+|open\s+)?tickets?\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+tickets?\s+do\s+i\s+have\b", re.IGNORECASE),
+    re.compile(r"\btickets?\s+(do\s+i\s+have|i\s+(have|raised|opened|filed))\b", re.IGNORECASE),
+]
+_TICKET_STATUS_FILTER_PATTERNS: list[tuple["re.Pattern[str]", str]] = [
+    (re.compile(r"\bin[\s_-]?progress\b", re.IGNORECASE), "in_progress"),
+    (re.compile(r"\b(closed|resolved|completed)\b", re.IGNORECASE), "closed"),
+    (re.compile(r"\bopen\b", re.IGNORECASE), "open"),
+]
+_LIST_TICKETS_EMPTY_REPLY = (
+    "You don't have any support tickets yet. If something's blocking you, tell me what's going on "
+    "and I can open one for you."
 )
 _TICKET_CONSENT_PATTERNS = [
     re.compile(r"\b(yes|yep|yeah|sure|okay|ok|please|go ahead|do it|proceed|confirm)\b", re.IGNORECASE),
@@ -370,6 +384,16 @@ async def send_message(
     await _bump_conversation_title(db, c, body.content)
     agent_state = chat_agent.normalize_state(c.get("agentState"))
 
+    planner_state = await _planner_state_with_unresolved_signal(
+        db, cid, agent_state, body.content
+    )
+    enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = await _enhance_query(
+        db,
+        cid,
+        body.content,
+        agent_state=planner_state,
+    )
+
     if await _should_create_ticket_from_consent(db, cid, body.content):
         ticket = await _create_ticket_from_conversation(
             db,
@@ -396,7 +420,7 @@ async def send_message(
             citations=[],
             can_answer=False,
             started=started,
-            rewritten_query=None,
+            rewritten_query=enhanced_query,
             intent="ticket_created",
             kind="ticket_created",
             ticket_id=ticket["_id"],
@@ -409,6 +433,17 @@ async def send_message(
     if await _should_acknowledge_resolution(db, cid, body.content):
         await _persist_agent_state(db, cid, _resolution_state(agent_state, body.content))
         assistant_msg = await _persist_resolution_acknowledgement(db, cid, started)
+        return {
+            "userMessage": serialize_message(user_msg),
+            "assistantMessage": serialize_message(assistant_msg),
+        }
+
+    if _detect_list_tickets_intent(body.content):
+        status_filter = _extract_ticket_status_filter(body.content)
+        tickets = await _fetch_user_tickets(db, user.userId, status=status_filter)
+        assistant_msg = await _persist_tickets_list_reply(
+            db, cid, started, tickets, status=status_filter
+        )
         return {
             "userMessage": serialize_message(user_msg),
             "assistantMessage": serialize_message(assistant_msg),
@@ -430,9 +465,6 @@ async def send_message(
             "assistantMessage": serialize_message(assistant_msg),
         }
 
-    planner_state = await _planner_state_with_unresolved_signal(
-        db, cid, agent_state, body.content
-    )
     prepared = await _prepare_agent_turn(
         db,
         cid,
@@ -441,11 +473,13 @@ async def send_message(
         tenant_id=tenant_for(user),
         agent_state=agent_state,
         planner_state=planner_state,
+        pre_enhanced=(enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries),
     )
 
     decision = prepared["decision"]
     retrieval = prepared["retrieval"]
-    planner_citations = prepared["selected_citations"]
+    # Full retrieval set (same as LLM context); _select_citations is only for verifier/used-[n] logic.
+    context_citations = retrieval.citations()
 
     if decision.action == "ask_clarifying_question":
         next_state = chat_agent.apply_decision_to_state(agent_state, decision)
@@ -454,7 +488,7 @@ async def send_message(
             db,
             cid,
             content=decision.reply,
-            citations=planner_citations,
+            citations=context_citations,
             can_answer=None,
             started=started,
             rewritten_query=retrieval.rewritten_query,
@@ -473,7 +507,7 @@ async def send_message(
             db,
             cid,
             content=decision.reply,
-            citations=planner_citations,
+            citations=context_citations,
             can_answer=False,
             started=started,
             rewritten_query=retrieval.rewritten_query,
@@ -522,13 +556,14 @@ async def send_message(
         }
 
     answer_state = chat_agent.apply_decision_to_state(agent_state, decision)
-    _, turns = await _build_chat_payload(
+    _, turns, required_stage = await _build_chat_payload(
         db,
         cid,
         body.content,
         retrieval.context_block(),
         prepared["memory_snippets"],
         agent_state=answer_state,
+        rewritten_query=retrieval.rewritten_query,
     )
 
     answer, can_answer, used_idx = await _generate_answer(turns)
@@ -539,6 +574,7 @@ async def send_message(
         answer=answer,
         citations=filtered,
         can_answer=can_answer,
+        rewritten_query=retrieval.rewritten_query,
     )
 
     message_kind = "answer"
@@ -559,16 +595,18 @@ async def send_message(
         final_state["lastQuestion"] = None
     await _persist_agent_state(db, cid, final_state)
 
+    final_verdict = message_kind == "answer" and required_stage == "Stage 4"
     assistant_msg = await _persist_assistant_message(
         db,
         cid,
         content=answer,
-        citations=filtered,
+        citations=context_citations,
         can_answer=can_answer,
         started=started,
         rewritten_query=retrieval.rewritten_query,
         intent=response_intent,
         kind=message_kind,
+        final_verdict=final_verdict,
     )
     await agent_memory.add_exchange_memory(user.userId, body.content, answer)
 
@@ -613,6 +651,20 @@ async def send_message_stream(
 
         agent_state = chat_agent.normalize_state(c.get("agentState"))
 
+        yield _sse("process", {"name": "Reviewing investigation memory", "status": "started"})
+        planner_state = await _planner_state_with_unresolved_signal(
+            db, cid, agent_state, body.content
+        )
+        yield _sse("process", {"name": "Enhancing user query", "status": "started"})
+        enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = await _enhance_query(
+            db,
+            cid,
+            body.content,
+            agent_state=planner_state,
+        )
+        yield _sse("process", {"name": "Enhancing user query", "status": "completed"})
+        yield _sse("process", {"name": "Reviewing investigation memory", "status": "completed"})
+
         yield _sse("process", {"name": "Checking ticket creation consent", "status": "started"})
         if await _should_create_ticket_from_consent(db, cid, body.content):
             yield _sse("process", {"name": "Checking ticket creation consent", "status": "completed"})
@@ -646,7 +698,7 @@ async def send_message_stream(
                 citations=[],
                 can_answer=False,
                 started=started,
-                rewritten_query=None,
+                rewritten_query=enhanced_query,
                 intent="ticket_created",
                 kind="ticket_created",
                 ticket_id=ticket["_id"],
@@ -672,6 +724,25 @@ async def send_message_stream(
             return
         yield _sse("process", {"name": "Checking resolution signal", "status": "completed"})
 
+        yield _sse("process", {"name": "Checking list-tickets intent", "status": "started"})
+        if _detect_list_tickets_intent(body.content):
+            yield _sse("process", {"name": "Checking list-tickets intent", "status": "completed"})
+            yield _sse("process", {"name": "Fetching your tickets", "status": "started"})
+            status_filter = _extract_ticket_status_filter(body.content)
+            tickets = await _fetch_user_tickets(db, user.userId, status=status_filter)
+            tickets_reply = _format_tickets_reply(tickets, status=status_filter)
+            yield _sse("citations", [])
+            for chunk in tickets_reply.split(" "):
+                yield _sse("token", {"delta": chunk + " "})
+            assistant_msg = await _persist_tickets_list_reply(
+                db, cid, started, tickets, status=status_filter
+            )
+            yield _sse("process", {"name": "Fetching your tickets", "status": "completed"})
+            yield _sse("process", {"name": "Completed", "status": "completed"})
+            yield _sse("done", serialize_message(assistant_msg))
+            return
+        yield _sse("process", {"name": "Checking list-tickets intent", "status": "completed"})
+
         yield _sse("process", {"name": "Checking ticket escalation intent", "status": "started"})
         if _detect_ticket_intent(body.content):
             yield _sse("process", {"name": "Checking ticket escalation intent", "status": "completed"})
@@ -695,19 +766,6 @@ async def send_message_stream(
             return
         yield _sse("process", {"name": "Checking ticket escalation intent", "status": "completed"})
 
-        yield _sse("process", {"name": "Reviewing investigation memory", "status": "started"})
-        planner_state = await _planner_state_with_unresolved_signal(
-            db, cid, agent_state, body.content
-        )
-        yield _sse("process", {"name": "Enhancing user query", "status": "started"})
-        enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = await _enhance_query(
-            db,
-            cid,
-            body.content,
-            agent_state=planner_state,
-        )
-        yield _sse("process", {"name": "Enhancing user query", "status": "completed"})
-
         yield _sse("process", {"name": "Retrieving relevant knowledge", "status": "started"})
         retrieval = await _cached_retrieve(
             db,
@@ -723,7 +781,6 @@ async def send_message_stream(
         yield _sse("process", {"name": "Loading user memory", "status": "started"})
         memory_snippets = await agent_memory.search_user_memory(user.userId, body.content)
         yield _sse("process", {"name": "Loading user memory", "status": "completed"})
-        yield _sse("process", {"name": "Reviewing investigation memory", "status": "completed"})
 
         yield _sse("process", {"name": "Planning next best action", "status": "started"})
         recent_messages = await _recent_messages(db, cid)
@@ -737,8 +794,9 @@ async def send_message_stream(
         )
         yield _sse("process", {"name": "Planning next best action", "status": "completed"})
 
-        planner_citations = _select_citations(retrieval.citations(), decision.used_citations)
-        yield _sse("citations", planner_citations)
+        # Same chunk list as retrieval.context_block() / planner input — show all in UI, not usedCitations-only.
+        context_citations = retrieval.citations()
+        yield _sse("citations", context_citations)
 
         yield _sse("process", {"name": "Updating investigation memory", "status": "started"})
         if decision.action != "answer":
@@ -754,7 +812,7 @@ async def send_message_stream(
                 db,
                 cid,
                 content=decision.reply,
-                citations=planner_citations,
+                citations=context_citations,
                 can_answer=None,
                 started=started,
                 rewritten_query=retrieval.rewritten_query,
@@ -774,7 +832,7 @@ async def send_message_stream(
                 db,
                 cid,
                 content=decision.reply,
-                citations=planner_citations,
+                citations=context_citations,
                 can_answer=False,
                 started=started,
                 rewritten_query=retrieval.rewritten_query,
@@ -829,13 +887,14 @@ async def send_message_stream(
         answer_state = chat_agent.apply_decision_to_state(agent_state, decision)
 
         yield _sse("process", {"name": "Composing grounded answer", "status": "started"})
-        _, turns = await _build_chat_payload(
+        _, turns, required_stage = await _build_chat_payload(
             db,
             cid,
             body.content,
             retrieval.context_block(),
             memory_snippets,
             agent_state=answer_state,
+            rewritten_query=retrieval.rewritten_query,
         )
         yield _sse("process", {"name": "Composing grounded answer", "status": "completed"})
 
@@ -867,6 +926,7 @@ async def send_message_stream(
             answer=answer,
             citations=filtered,
             can_answer=can_answer,
+            rewritten_query=retrieval.rewritten_query,
         )
         yield _sse("process", {"name": "Verifying grounding", "status": "completed"})
 
@@ -894,16 +954,18 @@ async def send_message_stream(
             final_state["lastAction"] = "offer_ticket"
             final_state["lastQuestion"] = None
         await _persist_agent_state(db, cid, final_state)
+        final_verdict = message_kind == "answer" and required_stage == "Stage 4"
         assistant_msg = await _persist_assistant_message(
             db,
             cid,
             content=answer,
-            citations=filtered,
+            citations=context_citations,
             can_answer=can_answer,
             started=started,
             rewritten_query=retrieval.rewritten_query,
             intent=response_intent,
             kind=message_kind,
+            final_verdict=final_verdict,
         )
         await agent_memory.add_exchange_memory(user.userId, body.content, answer)
         yield _sse("process", {"name": "Saving assistant response", "status": "completed"})
@@ -926,6 +988,98 @@ def _detect_ticket_intent(content: str) -> bool:
     if not text:
         return False
     return any(p.search(text) for p in _TICKET_INTENT_PATTERNS)
+
+
+def _detect_list_tickets_intent(content: str) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return False
+    if any(p.search(text) for p in _TICKET_INTENT_PATTERNS):
+        return False
+    return any(p.search(text) for p in _LIST_TICKETS_INTENT_PATTERNS)
+
+
+def _extract_ticket_status_filter(content: str) -> str | None:
+    text = (content or "").strip()
+    if not text:
+        return None
+    for pattern, status in _TICKET_STATUS_FILTER_PATTERNS:
+        if pattern.search(text):
+            return status
+    return None
+
+
+async def _fetch_user_tickets(
+    db,
+    user_id: str,
+    *,
+    status: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, object]]:
+    query: dict[str, object] = {"userId": user_id}
+    if status:
+        query["status"] = status
+    rows = (
+        await db.tickets.find(query)
+        .sort("createdAt", -1)
+        .to_list(length=limit)
+    )
+    return [serialize_ticket(r) for r in rows]
+
+
+def _format_tickets_reply(
+    tickets: list[dict[str, object]],
+    *,
+    status: str | None = None,
+) -> str:
+    status_label = status.replace("_", " ") if status else None
+    if not tickets:
+        if status_label:
+            return (
+                f"You don't have any {status_label} support tickets right now. "
+                "Let me know if you'd like to see tickets in another status."
+            )
+        return _LIST_TICKETS_EMPTY_REPLY
+    header = (
+        f"Here are your {status_label} support tickets ({len(tickets)} total):"
+        if status_label
+        else f"Here are your support tickets ({len(tickets)} total):"
+    )
+    lines: list[str] = [header, ""]
+    for t in tickets:
+        ticket_id = t.get("id")
+        subject = str(t.get("subject") or "Untitled").strip() or "Untitled"
+        status = str(t.get("status") or "open").strip() or "open"
+        priority = str(t.get("priority") or "").strip()
+        meta = status if not priority else f"{status} · {priority} priority"
+        lines.append(f"- **#{ticket_id} — {subject}** — {meta}")
+        last_update = str(t.get("lastUpdate") or "").strip()
+        if last_update:
+            lines.append(f"  Last update: {last_update}")
+    lines.append("")
+    lines.append("Let me know if you'd like to dig into any of these.")
+    return "\n".join(lines)
+
+
+async def _persist_tickets_list_reply(
+    db,
+    cid: int,
+    started: float,
+    tickets: list[dict[str, object]],
+    *,
+    status: str | None = None,
+) -> dict:
+    return await _persist_assistant_message(
+        db,
+        cid,
+        content=_format_tickets_reply(tickets, status=status),
+        citations=[],
+        can_answer=True,
+        started=started,
+        rewritten_query=None,
+        intent="list_tickets",
+        kind="tickets_list",
+    )
 
 
 def _detect_unresolved_signal(content: str) -> bool:
@@ -1032,7 +1186,12 @@ async def _should_create_ticket_from_consent(db, cid: int, user_text: str) -> bo
     )
     if not last_assistant:
         return False
-    return str(last_assistant.get("kind") or "").strip() == "ticket_offer"
+    kind = str(last_assistant.get("kind") or "").strip()
+    if kind == "ticket_offer":
+        return True
+    if kind == "answer" and last_assistant.get("finalVerdict") is True:
+        return True
+    return False
 
 
 def _normalize_string_items(raw: object, *, limit: int) -> list[str]:
@@ -1089,13 +1248,16 @@ async def _enforce_grounded_answer(
     answer: str,
     citations: list[dict[str, object]],
     can_answer: bool,
+    rewritten_query: str | None = None,
 ) -> tuple[str, bool, bool]:
-    """Verify every action / UI claim is supported by the citations.
+    """Verify every action / UI claim is supported by the citations and that
+    the answer stays on the topic of the consolidated user query.
 
-    Returns ``(answer, can_answer, replaced)``. When the verifier rejects the
-    answer, the answer text is replaced with a ticket-offer fallback and
-    ``can_answer`` is forced to False. ``replaced`` indicates whether the
-    answer was rewritten so callers can adjust streamed output / message kind.
+    Returns ``(answer, can_answer, replaced)``. When either verifier rejects
+    the answer and a repair pass cannot salvage it, the answer text is
+    replaced with a ticket-offer fallback and ``can_answer`` is forced to
+    False. ``replaced`` indicates whether the answer was rewritten so callers
+    can adjust streamed output / message kind.
     """
     if not can_answer:
         return answer, can_answer, False
@@ -1108,30 +1270,71 @@ async def _enforce_grounded_answer(
         answer=answer,
         citations=citations,
     )
-    if grounded:
-        return answer, can_answer, False
-    log.info(
-        "answer rejected by grounding verifier; unsupported=%s",
-        unsupported,
-    )
-    rewritten = await chat_agent.rewrite_to_ground(
-        answer=answer,
-        citations=citations,
-        unsupported=unsupported,
-    )
-    if rewritten:
-        regrounded, still_unsupported = await chat_agent.verify_answer_grounding(
-            answer=rewritten,
+    if not grounded:
+        log.info(
+            "answer rejected by grounding verifier; unsupported=%s",
+            unsupported,
+        )
+        rewritten = await chat_agent.rewrite_to_ground(
+            answer=answer,
+            citations=citations,
+            unsupported=unsupported,
+        )
+        if rewritten:
+            regrounded, still_unsupported = await chat_agent.verify_answer_grounding(
+                answer=rewritten,
+                citations=citations,
+            )
+            if regrounded:
+                log.info("answer rewritten to remove unsupported phrases and re-verified")
+                answer = rewritten
+            else:
+                log.info(
+                    "rewrite still rejected by grounding verifier; unsupported=%s",
+                    still_unsupported,
+                )
+                return _UNGROUNDED_FALLBACK, False, True
+        else:
+            return _UNGROUNDED_FALLBACK, False, True
+
+    if rewritten_query and (rewritten_query or "").strip():
+        on_topic, off_topic = await chat_agent.verify_answer_on_topic(
+            user_query=rewritten_query,
+            answer=answer,
             citations=citations,
         )
-        if regrounded:
-            log.info("answer rewritten to remove unsupported phrases and re-verified")
-            return rewritten, True, False
-        log.info(
-            "rewrite still rejected by grounding verifier; unsupported=%s",
-            still_unsupported,
-        )
-    return _UNGROUNDED_FALLBACK, False, True
+        if not on_topic:
+            log.info(
+                "answer rejected by on-topic verifier; offTopic=%s",
+                off_topic,
+            )
+            retopic = await chat_agent.rewrite_to_topic(
+                user_query=rewritten_query,
+                answer=answer,
+                citations=citations,
+                off_topic=off_topic,
+            )
+            if retopic:
+                still_on_topic, still_off_topic = await chat_agent.verify_answer_on_topic(
+                    user_query=rewritten_query,
+                    answer=retopic,
+                    citations=citations,
+                )
+                if still_on_topic:
+                    regrounded, _ = await chat_agent.verify_answer_grounding(
+                        answer=retopic,
+                        citations=citations,
+                    )
+                    if regrounded:
+                        log.info("answer rewritten to stay on topic and re-verified")
+                        return retopic, True, False
+                log.info(
+                    "topic rewrite still rejected; offTopic=%s",
+                    still_off_topic,
+                )
+            return _UNGROUNDED_FALLBACK, False, True
+
+    return answer, True, False
 
 
 def _append_ticket_offer(answer: str) -> str:
@@ -1269,95 +1472,20 @@ async def _enhance_query(
     *,
     agent_state: dict[str, object] | None = None,
 ) -> tuple[str, str, list[str], list[str]]:
-    """Resolve follow-up references and produce a retrieval-friendly rewrite.
-
-    Returns ``(rewritten, intent, keywords, subqueries)``. Keywords and
-    subqueries are used to widen the retrieval pool with multi-query hybrid
-    search so the agent gets richer grounded context.
-    """
-    if os.environ.get("DISABLE_QUERY_REWRITE", "").lower() in {"1", "true", "yes"}:
-        return current, "general", [], []
-
+    """Resolve follow-up references and produce a retrieval-friendly rewrite."""
     recent = (
         await db.messages.find(
             {"conversationId": cid}, {"role": 1, "content": 1, "createdAt": 1}
         )
         .sort("createdAt", -1)
-        .to_list(length=6)
+        .to_list(length=12)
     )
     recent.reverse()
-    history_block = "\n".join(
-        f"{m['role']}: {(m.get('content') or '').strip()[:300]}"
-        for m in recent
-        if m.get("content")
-    ) or "(no prior turns)"
-    investigation_block = chat_agent.state_context_block(agent_state or {})
-
-    sys_prompt = (
-        "You enhance customer support queries for a knowledge-base retrieval step. "
-        "Given the recent conversation, the investigation memory, and the user's latest message,"
-        " produce a search plan that maximises grounded recall over the knowledge base.\n\n"
-        "CRITICAL — the rewritten query MUST be a self-contained, consolidated question that"
-        " carries forward every key term established earlier in this conversation. The latest user"
-        " message is almost never enough on its own: it is usually a short reply to a clarifying"
-        " question (e.g. 'yes', 'all', 'web browser', 'access denied', a number, a category). Treat"
-        " those replies as new facts to MERGE with the original topic, not as a new query.\n\n"
-        "To build the rewritten query, walk the conversation and the investigation memory and"
-        " collect: the original product / system the user asked about (e.g. Jira, Zoom, Outlook),"
-        " the core symptom or task (e.g. access denied, cannot join, missing button), every error"
-        " message or code mentioned, the scope/qualifier the user has confirmed (e.g. all projects"
-        " vs one project, web vs desktop, free vs paid), and any environment detail (browser, OS,"
-        " device). Then fuse them into ONE natural-language question.\n\n"
-        "Output four fields:\n"
-        "- rewritten: a single self-contained query, 6 to 40 words, that a search engine could"
-        " answer cold without seeing this conversation. It MUST mention the product/system, the"
-        " symptom, and every clarifying fact the user has already confirmed. Expand obvious"
-        " acronyms. Strip greetings and pleasantries. Preserve proper nouns, error codes, product"
-        " names, and exact UI strings verbatim. NEVER return just the latest user message verbatim"
-        " when prior turns established a topic — always merge.\n"
-        "- intent: one of how_to | troubleshooting | billing | account | policy | general.\n"
-        "- keywords: 4 to 10 short search terms or phrases that capture the most important concepts"
-        " in the user's situation. Include product names, feature names, error codes, action verbs"
-        " (the symptom or task), and the technical noun the user is struggling with. Add 1 to 2"
-        " useful synonyms or alternate spellings only when they would help BM25 retrieval. Do NOT"
-        " invent product UI elements that the user did not mention.\n"
-        "- subqueries: 1 to 3 alternative phrasings of the same consolidated question, each under"
-        " 25 words, that target a different angle (for example: cause-oriented vs fix-oriented vs"
-        " symptom-oriented, or different vocabulary the knowledge base might use). Each must also"
-        " be self-contained and stay faithful to the user's actual problem; do not drift to a"
-        " different topic.\n\n"
-        "Worked example. Conversation so far: user said 'I have access issue on Jira', then"
-        " confirmed 'all' projects, then 'Access denied', then 'web browser'. Latest message:"
-        " 'web browser'. WRONG rewrite: 'web browser'. CORRECT rewrite: 'Jira access denied error"
-        " for all projects when accessing via web browser — how to restore access'.\n\n"
-        'Reply as JSON: {"rewritten": "<query>", "intent": "<intent>", '
-        '"keywords": ["<term>", ...], "subqueries": ["<phrasing>", ...]}'
+    return await query_rewrite.enhance_query(
+        current,
+        recent_messages=recent,
+        agent_state=agent_state,
     )
-    user_prompt = (
-        f"Investigation memory:\n{investigation_block}\n\n"
-        f"Recent conversation:\n{history_block}\n\n"
-        f"Latest user message:\n{current}"
-    )
-
-    try:
-        raw = await llm.chat(
-            [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            json_mode=True,
-            temperature=0.0,
-            max_tokens=400,
-        )
-        obj = json.loads(raw)
-        rewritten = (obj.get("rewritten") or "").strip() or current
-        intent = (obj.get("intent") or "general").strip() or "general"
-        keywords = _normalize_string_items(obj.get("keywords"), limit=10)
-        subqueries = _normalize_string_items(obj.get("subqueries"), limit=3)
-        return rewritten, intent, keywords, subqueries
-    except Exception as err:
-        log.debug("query enhancement failed, using raw query: %s", err)
-        return current, "general", [], []
 
 
 async def _persist_user_message(
@@ -1392,6 +1520,7 @@ async def _persist_assistant_message(
     intent: str | None,
     kind: str,
     ticket_id: int | None = None,
+    final_verdict: bool = False,
 ) -> dict:
     assistant_msg = {
         "_id": await next_id("messages"),
@@ -1409,6 +1538,8 @@ async def _persist_assistant_message(
         "ticketId": ticket_id,
         "createdAt": datetime.now(timezone.utc),
     }
+    if final_verdict:
+        assistant_msg["finalVerdict"] = True
     await db.messages.insert_one(assistant_msg)
     return assistant_msg
 
@@ -1465,14 +1596,18 @@ async def _prepare_agent_turn(
     tenant_id: str | None,
     agent_state: dict[str, object],
     planner_state: dict[str, object] | None = None,
+    pre_enhanced: tuple[str, str, list[str], list[str]] | None = None,
 ) -> dict[str, object]:
     state_for_planner = planner_state or agent_state
-    enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = await _enhance_query(
-        db,
-        cid,
-        content,
-        agent_state=state_for_planner,
-    )
+    if pre_enhanced is not None:
+        enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = pre_enhanced
+    else:
+        enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = await _enhance_query(
+            db,
+            cid,
+            content,
+            agent_state=state_for_planner,
+        )
     retrieval = await _cached_retrieve(
         db,
         content,
@@ -1496,7 +1631,6 @@ async def _prepare_agent_turn(
         "decision": decision,
         "retrieval": retrieval,
         "memory_snippets": memory_snippets,
-        "selected_citations": _select_citations(retrieval.citations(), decision.used_citations),
     }
 
 
@@ -1560,6 +1694,7 @@ async def _build_chat_payload(
     memory_snippets: list[str] | None = None,
     *,
     agent_state: dict[str, object] | None = None,
+    rewritten_query: str | None = None,
 ):
     memory_block = ""
     if memory_snippets:
@@ -1583,7 +1718,9 @@ async def _build_chat_payload(
         .to_list(length=None)
     )
     recent_slice = recent[-6:]
+    answer_query = (rewritten_query or "").strip() or current_user_content
     required_stage = _infer_required_troubleshooting_stage(recent_slice, current_user_content)
+    is_final_verdict_stage = required_stage == "Stage 4"
     stage_requirement_block = ""
     if required_stage:
         stage_requirement_block = (
@@ -1592,16 +1729,78 @@ async def _build_chat_payload(
             "- If required stage is Stage 1, output only diagnosis plus consent check for next steps.\n"
             "- If required stage is Stage 2, output only 'Try this now:' with one concrete action.\n"
             "- If required stage is Stage 3, output only 'What to tell me next:' asking for the result.\n"
-            "- If required stage is Stage 4, output the fuller grounded resolution or fallback path.\n"
+            "- If required stage is Stage 4, output the complete grounded resolution or honest fallback."
+            " This is the final verdict: do NOT ask any question, do NOT use question marks, and end with"
+            " a brief warm closing sentence as a statement only.\n"
         )
 
-    sys_prompt = (
-        "You are Helia, a warm and capable AI customer support teammate. "
-        "Answer the user's question using ONLY the numbered context snippets below.\n\n"
+    answer_step_closing = (
         "This is the final answer step for the current turn. The investigation has already happened. "
         "Use the accumulated investigation memory and the verified context to give the strongest useful"
         " answer you can now. Do not restart broad discovery in this step, but you may end with one"
         " brief, targeted follow-up question when it helps the user confirm the next action.\n\n"
+        if not is_final_verdict_stage
+        else (
+            "This is the final answer step for the current turn. The investigation has already happened. "
+            "Use the accumulated investigation memory and the verified context to give the strongest useful"
+            " answer you can now. For Stage 4 (final verdict), do NOT ask any follow-up question and do NOT"
+            " use question marks — deliver complete guidance and close warmly in statements only.\n\n"
+        )
+    )
+
+    ungrounded_clarify_rule = (
+        " situation, do NOT improvise. Instead set canAnswer to false, briefly say what specific"
+        " detail or document is missing, and either ask one narrow question whose answer would"
+        " unlock a grounded step from the snippets, or wait for the user to provide more detail."
+        " Never fabricate a fix or a cause.\n"
+        if not is_final_verdict_stage
+        else (
+            " situation, do NOT improvise. Instead set canAnswer to false, briefly say what specific"
+            " detail or document is missing, and do not ask clarifying questions. Never fabricate a fix or a cause.\n"
+        )
+    )
+
+    participation_line = (
+        "- Aim for a real back-and-forth chat where the user is invited to participate each turn,"
+        " not a one-shot help-article dump.\n\n"
+        if not is_final_verdict_stage
+        else "- Stage 4 is the closing turn: be complete and decisive; the app will collect feedback separately.\n\n"
+    )
+
+    followup_detail_rules = (
+        "- The follow-up question must be specific and actionable, not generic. Ask about the result"
+        " of the step you just gave or the single most decisive remaining detail.\n"
+        "- Once the user reaches Stage 4, clearly explain what they should do or check to resolve"
+        " the issue. Guide them through steps kindly and clearly. Be their helper, not just a list"
+        " of tasks.\n"
+        if not is_final_verdict_stage
+        else (
+            "- Stage 4 only: present your fullest useful resolution without asking the user for anything.\n"
+        )
+    )
+
+    kb_missing_followup = (
+        " If a narrow clarifying question would unlock a grounded step"
+        " from the snippets, ask that question instead.\n"
+        if not is_final_verdict_stage
+        else " Do not ask clarifying questions in Stage 4.\n"
+    )
+
+    sys_prompt = (
+        "You are Helia, a warm and capable AI customer support teammate. "
+        "Answer the user's question using ONLY the numbered context snippets below.\n\n"
+        f"{answer_step_closing}"
+        "IMPORTANT — answer the consolidated user query exactly:\n"
+        "- The user message you receive in this turn is a SELF-CONTAINED, REWRITTEN question that"
+        "  already merges the original product/system, the symptom, and every clarifying fact the"
+        "  user has confirmed earlier in this conversation. Treat it as the authoritative statement"
+        "  of what the user is asking about right now.\n"
+        "- Stay strictly on the product, feature, and scope named in that consolidated query. Do NOT"
+        "  introduce a different product or feature, even if a snippet mentions it. For example, if"
+        "  the consolidated query is about Zoom, do not mention Bluetooth or any other unrelated"
+        "  feature, even if a retrieved snippet talks about it.\n"
+        "- If the cited snippets do not actually cover the product or scope in the consolidated"
+        "  query, set canAnswer to false rather than answering about a different topic.\n\n"
         "Strict grounding rule (most important):\n"
         "- Every concrete action step you ask the user to take — every 'click X', 'open Y', 'go to Z',"
         " 'select W', 'run N', 'enable M', 'check P', every menu name, button label, settings path,"
@@ -1620,10 +1819,7 @@ async def _build_chat_payload(
         " like 'check your audio settings' without naming a specific UI control is also forbidden"
         " unless a snippet says it.\n"
         "- If the snippets do not contain a concrete grounded action or cause for the user's specific"
-        " situation, do NOT improvise. Instead set canAnswer to false, briefly say what specific"
-        " detail or document is missing, and either ask one narrow question whose answer would"
-        " unlock a grounded step from the snippets, or wait for the user to provide more detail."
-        " Never fabricate a fix or a cause.\n"
+        f"{ungrounded_clarify_rule}"
         "- If the user describes a product or scenario the snippets do not cover at all, say so plainly"
         " and set canAnswer to false. Do not pivot to generic advice from world knowledge.\n"
         "- Self-check before sending: for every action verb (click, open, select, navigate, go to,"
@@ -1669,8 +1865,7 @@ async def _build_chat_payload(
         "- Do not use bullet lists in Stage 1, Stage 2, or Stage 3. Use plain conversational sentences.\n"
         "- In Stage 4, use bullets only if listing 2 or 3 short concrete steps. Never produce long"
         " bullet dumps or multi-paragraph walls of text.\n"
-        "- Aim for a real back-and-forth chat where the user is invited to participate each turn,"
-        " not a one-shot help-article dump.\n\n"
+        f"{participation_line}"
         "Solution intent (important):\n"
         "- Use the whole conversation plus investigation memory, not just the latest user message,"
         " to decide what the user has already tried and what the most useful next action is.\n"
@@ -1693,11 +1888,7 @@ async def _build_chat_payload(
         " next:' in the same message. Each label belongs to its own separate turn.\n"
         "- After outputting 'Try this now:', stop. Do not also write 'What to tell me next:' in that"
         " same turn — that line is for the following assistant turn only.\n"
-        "- The follow-up question must be specific and actionable, not generic. Ask about the result"
-        " of the step you just gave or the single most decisive remaining detail.\n"
-        "- Once the user reaches Stage 4, clearly explain what they should do or check to resolve"
-        " the issue. Guide them through steps kindly and clearly. Be their helper, not just a list"
-        " of tasks.\n"
+        f"{followup_detail_rules}"
         "- Use the investigation memory to tailor the answer to the facts already gathered in prior turns.\n"
         "- Prefer a concrete likely fix path over a vague diagnosis summary.\n"
         "- Only suggest actions the user can actually take themselves; never claim you can access "
@@ -1707,8 +1898,7 @@ async def _build_chat_payload(
         " and every product-specific term needs a [n] citation.\n"
         "- If the answer cannot be found in the context, set canAnswer to false, apologise briefly,"
         " and say exactly what detail or document is still missing. Do not invent a 'best guess' next"
-        " step from general knowledge. If a narrow clarifying question would unlock a grounded step"
-        " from the snippets, ask that question instead.\n"
+        f" step from general knowledge.{kb_missing_followup}"
         "- Do not mention support tickets or escalation unless the user explicitly asks for that.\n"
         "- Never invent facts, policies, UI elements, menu paths, settings names, or steps that are"
         " not supported by the context.\n\n"
@@ -1720,15 +1910,8 @@ async def _build_chat_payload(
     )
 
     turns: list[llm.ChatTurn] = [{"role": "system", "content": sys_prompt}]
-    for m in recent_slice[:-1]:
-        turns.append(
-            {
-                "role": "assistant" if m["role"] == "assistant" else "user",
-                "content": m["content"],
-            }
-        )
-    turns.append({"role": "user", "content": current_user_content})
-    return sys_prompt, turns
+    turns.append({"role": "user", "content": answer_query})
+    return sys_prompt, turns, required_stage
 
 
 async def _generate_answer(turns: list[llm.ChatTurn]) -> tuple[str, bool | None, list[int]]:

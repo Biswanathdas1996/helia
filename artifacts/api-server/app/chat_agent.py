@@ -631,6 +631,160 @@ async def verify_answer_grounding(
     return grounded, unsupported
 
 
+async def verify_answer_on_topic(
+    *,
+    user_query: str,
+    answer: str,
+    citations: list[dict[str, Any]],
+) -> tuple[bool, list[str]]:
+    """Return (is_on_topic, off_topic_phrases).
+
+    Checks that the answer addresses the same product/feature/scope as the
+    consolidated user query, and does not introduce a different product or
+    feature the user did not ask about. This catches drift like "user asked
+    about Zoom but the answer talks about Bluetooth" — a class of error the
+    UI-grounding verifier in :func:`verify_answer_grounding` does not catch
+    because each individual UI label may still appear in some snippet.
+
+    Fail-open on infrastructure errors so transient verifier failures do not
+    silently block real answers.
+    """
+    query = (user_query or "").strip()
+    text = (answer or "").strip()
+    if not text or not query:
+        return True, []
+
+    snippets_block = _citations_block(citations)
+    system_prompt = (
+        "You verify that a support assistant's answer stays on the topic the user actually asked"
+        " about. The user query has already been consolidated into a self-contained question that"
+        " names the product, feature, and scope they care about.\n\n"
+        "Mark the answer off-topic ONLY if it introduces a DIFFERENT product, feature, or scope"
+        " that the user did not ask about. Examples of off-topic drift:\n"
+        "- User asked about Zoom audio; answer recommends Bluetooth pairing or Windows Bluetooth"
+        " settings.\n"
+        "- User asked about Jira project access; answer talks about Confluence permissions.\n"
+        "- User asked how to enable a feature; answer recommends uninstalling the app instead.\n\n"
+        "An answer is ON-TOPIC if it addresses the same product / feature area as the query, even"
+        " if it cites a snippet that also mentions adjacent topics. Do NOT flag warm openers,"
+        " polite acknowledgements, generic guidance, or follow-up questions. Do NOT flag a citation"
+        " just because the snippet covers more than the user asked — only flag the assistant's own"
+        " RECOMMENDATIONS that drift to a different product / feature.\n\n"
+        "When in doubt, prefer onTopic=true. Only return onTopic=false when the answer's"
+        " recommendation is clearly about a different product or feature than the consolidated"
+        " query.\n\n"
+        "Return strict JSON only:\n"
+        '{"onTopic": boolean, "offTopic": ["short verbatim drifting phrase", ...]}'
+    )
+    user_prompt = (
+        f"Consolidated user query:\n{query}\n\n"
+        f"Numbered snippets the answer was grounded against:\n{snippets_block}\n\n"
+        f"Assistant answer to verify:\n{text}"
+    )
+
+    try:
+        raw = await llm.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            json_mode=True,
+            temperature=0.0,
+            max_tokens=300,
+        )
+        parsed = _parse_json_object(raw)
+    except Exception:
+        return True, []
+
+    if not isinstance(parsed, dict):
+        return True, []
+
+    on_topic = parsed.get("onTopic")
+    if not isinstance(on_topic, bool):
+        return True, []
+
+    off_topic_raw = parsed.get("offTopic")
+    off_topic: list[str] = []
+    if isinstance(off_topic_raw, list):
+        for item in off_topic_raw:
+            if isinstance(item, str) and item.strip():
+                off_topic.append(item.strip()[:200])
+            if len(off_topic) >= 5:
+                break
+    return on_topic, off_topic
+
+
+async def rewrite_to_topic(
+    *,
+    user_query: str,
+    answer: str,
+    citations: list[dict[str, Any]],
+    off_topic: list[str],
+) -> str | None:
+    """Ask the LLM to rewrite the answer so it addresses only the consolidated
+    user query, removing any drift to a different product/feature. Returns the
+    rewritten text, or ``None`` if the answer cannot be salvaged on topic.
+    """
+    query = (user_query or "").strip()
+    text = (answer or "").strip()
+    if not text or not query or not citations:
+        return None
+
+    snippets_block = _citations_block(citations)
+    flagged = "\n".join(f"- {item}" for item in off_topic[:5]) or "- (verifier did not list specific phrases)"
+
+    system_prompt = (
+        "You repair a support assistant answer that drifted off the user's actual question.\n"
+        "- The consolidated user query is the authoritative statement of what the user asked.\n"
+        "- Rewrite the answer so it stays strictly on the product, feature, and scope named in"
+        " that query. Remove any recommendation, cause, or step that is about a different"
+        " product or feature, even if a snippet mentioned it.\n"
+        "- Use ONLY the numbered snippets, and only the parts of those snippets that are about the"
+        " product/feature in the user's query. Cite snippets inline as [n].\n"
+        "- Preserve the warm, brief, conversational tone and the original stage shape (Stage 1"
+        " diagnosis, Stage 2 single try-this, Stage 3 follow-up question) if present.\n"
+        "- If the snippets contain no on-topic guidance for the user's query, return an empty"
+        " answer string and canAnswer=false. Do not invent guidance and do not pivot to an"
+        " adjacent topic.\n\n"
+        "Return strict JSON only:\n"
+        '{ "answer": string, "canAnswer": boolean, "usedCitations": number[] }'
+    )
+    user_prompt = (
+        f"Consolidated user query:\n{query}\n\n"
+        f"Numbered snippets:\n{snippets_block}\n\n"
+        f"Drifting answer to repair:\n{text}\n\n"
+        f"Phrases flagged as off-topic by the verifier:\n{flagged}"
+    )
+
+    try:
+        raw = await llm.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            json_mode=True,
+            temperature=0.1,
+            max_tokens=600,
+        )
+    except Exception:
+        return None
+
+    parsed = _parse_json_object(raw)
+    if not isinstance(parsed, dict):
+        return None
+
+    can_answer = parsed.get("canAnswer")
+    if can_answer is False:
+        return None
+    rewritten = parsed.get("answer")
+    if not isinstance(rewritten, str):
+        return None
+    rewritten = rewritten.strip()
+    if not rewritten:
+        return None
+    return rewritten
+
+
 async def rewrite_to_ground(
     *,
     answer: str,

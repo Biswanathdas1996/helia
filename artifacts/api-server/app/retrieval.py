@@ -25,7 +25,7 @@ from typing import Iterable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app import embeddings, llm
+from app import embeddings, llm, query_rewrite
 from app.text import jaccard, top_key_phrases, tokenize
 
 log = logging.getLogger("api-server.retrieval")
@@ -56,7 +56,8 @@ class RetrievedChunk:
             "chunkId": self.chunk_id,
             "documentId": self.document_id,
             "documentName": self.document_name,
-            "snippet": self.content[:280],
+            # Full chunk text for UI; planner/verifier prompts clip via chat_agent._citations_block.
+            "snippet": self.content,
             "score": round(float(self.score), 3),
             "metadata": self.metadata,
         }
@@ -93,7 +94,7 @@ async def retrieve(
     if pre_rewritten:
         rewritten, intent = pre_rewritten, (pre_intent or "general")
     else:
-        rewritten, intent = await _rewrite_query(query)
+        rewritten, intent, _, _ = await query_rewrite.enhance_query(query)
     search_query = rewritten or query
 
     doc_query: dict[str, object] = {"status": "approved"}
@@ -269,36 +270,6 @@ def _build_query_set(
         push(raw_query)
 
     return out[:_MAX_QUERIES]
-
-
-# ---------------------------------------------------------------------------
-# Stage 1 — query rewriting
-# ---------------------------------------------------------------------------
-
-async def _rewrite_query(query: str) -> tuple[str, str]:
-    """Return (rewritten, intent). Falls back to (query, "general") on error."""
-    if os.environ.get("DISABLE_QUERY_REWRITE", "").lower() in {"1", "true", "yes"}:
-        return query, "general"
-    sys_prompt = (
-        "You optimise customer support questions for retrieval over a knowledge base. "
-        'Reply as JSON: {"rewritten": "<keyword-rich rewrite>", "intent": "<one of: '
-        'how_to | troubleshooting | billing | account | policy | general>"}. '
-        "Strip pleasantries. Keep proper nouns. No more than 25 words in the rewrite."
-    )
-    try:
-        raw = await llm.chat(
-            [{"role": "system", "content": sys_prompt}, {"role": "user", "content": query}],
-            json_mode=True,
-            temperature=0.0,
-            max_tokens=200,
-        )
-        obj = json.loads(raw)
-        rewritten = (obj.get("rewritten") or "").strip() or query
-        intent = (obj.get("intent") or "general").strip() or "general"
-        return rewritten, intent
-    except Exception as err:
-        log.debug("query rewrite failed, using raw query: %s", err)
-        return query, "general"
 
 
 # ---------------------------------------------------------------------------

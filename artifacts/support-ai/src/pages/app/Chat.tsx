@@ -33,6 +33,7 @@ import {
   ChevronRight,
   Trash2,
   Paperclip,
+  Star,
   X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -54,6 +55,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
+const TICKET_AFTER_FINAL_VERDICT =
+  "Yes, please create a support ticket — the guided steps did not fully resolve my issue.";
 const BULLET_RE = /^[-*]\s+/;
 const ORDERED_RE = /^\d+\.\s+/;
 const CITATION_RE = /\[(\d+)\]/g;
@@ -462,6 +465,24 @@ function createdTicketIdOf(msg: { ticketId?: number | null; content: string }): 
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+const TICKET_FEEDBACK_STORAGE_PREFIX = "helia-chat-star-rating";
+
+function readStoredStarRating(conversationId: number | undefined): number | null {
+  if (!conversationId) return null;
+  try {
+    const raw = sessionStorage.getItem(`${TICKET_FEEDBACK_STORAGE_PREFIX}-${conversationId}`);
+    if (!raw) return null;
+    const n = Number.parseInt(raw, 10);
+    return n >= 1 && n <= 5 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function starsToMessageRating(stars: number): "up" | "down" {
+  return stars >= 3 ? "up" : "down";
+}
+
 function presentationForProcessStep(step: ProcessStep): {
   caption: string;
   label: string;
@@ -571,6 +592,7 @@ export default function Chat() {
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [isDescribingImage, setIsDescribingImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
   const [isConversationsOpen, setIsConversationsOpen] = useState(true);
   const [memoryGraphOpen, setMemoryGraphOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -616,6 +638,73 @@ export default function Chat() {
     () => (activeProcessStep ? presentationForProcessStep(activeProcessStep) : null),
     [activeProcessStep],
   );
+
+  const ticketCreatedMessage = useMemo(() => {
+    if (!activeConvo?.messages?.length) {
+      return null;
+    }
+    const created = activeConvo.messages.filter(
+      (m) => m.role === "assistant" && messageKindOf(m as { kind?: string | null }) === "ticket_created",
+    );
+    return created[created.length - 1] ?? null;
+  }, [activeConvo?.messages]);
+
+  const chatEndedWithTicket = Boolean(ticketCreatedMessage);
+
+  const [conversationStarDraft, setConversationStarDraft] = useState<number | null>(null);
+  const [storedStarRating, setStoredStarRating] = useState<number | null>(() => readStoredStarRating(currentId));
+
+  const [starRowHover, setStarRowHover] = useState<number | null>(null);
+
+  useEffect(() => {
+    setStoredStarRating(readStoredStarRating(currentId));
+    setConversationStarDraft(null);
+    setStarRowHover(null);
+  }, [currentId]);
+
+  const conversationFeedbackDone =
+    storedStarRating != null
+    || (ticketCreatedMessage != null
+      && ticketCreatedMessage.rating !== undefined
+      && ticketCreatedMessage.rating !== null);
+
+  const filledStarsReadonly =
+    storedStarRating
+    ?? (ticketCreatedMessage?.rating === "up"
+      ? 5
+      : ticketCreatedMessage?.rating === "down"
+        ? 2
+        : null);
+
+  const starHighlight =
+    starRowHover
+    ?? conversationStarDraft
+    ?? (conversationFeedbackDone ? filledStarsReadonly : null);
+
+  const submitConversationStarRating = async () => {
+    if (!currentId || !ticketCreatedMessage || conversationStarDraft == null) {
+      return;
+    }
+    try {
+      await rateMessage.mutateAsync({
+        id: ticketCreatedMessage.id,
+        data: {
+          rating: starsToMessageRating(conversationStarDraft),
+          comment: `Conversation rating: ${conversationStarDraft}/5`,
+        },
+      });
+      try {
+        sessionStorage.setItem(`${TICKET_FEEDBACK_STORAGE_PREFIX}-${currentId}`, String(conversationStarDraft));
+      } catch {
+        // ignore quota / privacy mode
+      }
+      setStoredStarRating(conversationStarDraft);
+      await queryClient.invalidateQueries({ queryKey: getGetConversationQueryKey(currentId) });
+      toast({ title: "Thanks for your feedback" });
+    } catch {
+      toast({ title: "Could not save feedback", variant: "destructive" });
+    }
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -781,7 +870,7 @@ export default function Chat() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!input.trim() && !imageFile) || isStreaming) return;
+    if ((!input.trim() && !imageFile) || isStreaming || chatEndedWithTicket) return;
 
     let content = input;
     setInput("");
@@ -849,6 +938,11 @@ export default function Chat() {
       toast({ title: "Failed to rate message", variant: "destructive" });
     }
   };
+
+  const requestTicketAfterFinalVerdict = useCallback(async () => {
+    if (!currentId || isStreaming) return;
+    await streamMessage(currentId, TICKET_AFTER_FINAL_VERDICT);
+  }, [currentId, isStreaming, streamMessage]);
 
   const handleConfirmDeleteConversation = () => {
     if (!deleteTarget) return;
@@ -1275,7 +1369,7 @@ export default function Chat() {
                         className="w-full px-5 py-4 rounded-[24px] rounded-tl-md text-sm bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] text-foreground ring-1 ring-white/70 backdrop-blur-sm"
                       >
                         {renderAssistantContent(segment)}
-                        {segmentIdx === segments.length - 1 && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'answer' && (msg as { rewrittenQuery?: string | null }).rewrittenQuery && (
+                        {segmentIdx === segments.length - 1 && (msg as { rewrittenQuery?: string | null }).rewrittenQuery && (
                           <div className="mt-4 pt-3 border-t border-border/50">
                             <p className="text-[11px] leading-snug text-muted-foreground/80">
                               <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Rewritten query</span>
@@ -1314,17 +1408,27 @@ export default function Chat() {
                                 [{idx + 1}] {cite.documentName}
                               </Badge>
                             </PopoverTrigger>
-                            <PopoverContent className="w-80 p-4 text-sm" align="start">
-                              <div className="font-medium flex items-center gap-2 mb-2 pb-2 border-b border-border">
-                                <FileText className="h-4 w-4 text-primary" />
-                                {cite.documentName}
+                            <PopoverContent
+                              className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden p-0"
+                              align="start"
+                              side="bottom"
+                              collisionPadding={16}
+                            >
+                              <div className="shrink-0 border-b border-border px-4 py-3">
+                                <div className="font-medium flex items-start gap-2">
+                                  <FileText className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                                  <span className="min-w-0 break-words">{cite.documentName}</span>
+                                </div>
                               </div>
-                              <p className="text-muted-foreground leading-relaxed">"...{cite.snippet}..."</p>
-                              <div className="mt-3">
-                                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
-                                  Chunk Metadata
+                              <div className="max-h-[min(70vh,26rem)] overflow-y-auto px-4 py-3">
+                                <p className="whitespace-pre-wrap break-words text-muted-foreground leading-relaxed">
+                                  {`"...${cite.snippet}..."`}
                                 </p>
-                                <pre className="text-[11px] leading-relaxed bg-muted/60 border border-border rounded p-2 overflow-x-auto">
+                                <div className="mt-3">
+                                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
+                                    Chunk Metadata
+                                  </p>
+                                  <pre className="max-w-full whitespace-pre-wrap break-words text-[11px] leading-relaxed bg-muted/60 border border-border rounded p-2 overflow-x-auto">
 {JSON.stringify(
   {
     fileName: cite.metadata?.fileName ?? cite.documentName,
@@ -1338,7 +1442,8 @@ export default function Chat() {
   null,
   2,
 )}
-                                </pre>
+                                  </pre>
+                                </div>
                               </div>
                             </PopoverContent>
                           </Popover>
@@ -1347,29 +1452,85 @@ export default function Chat() {
                     )}
                     
                     <div className="flex items-center gap-1 ml-auto">
-                      {messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'answer' && (
+                      {messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === "answer"
+                        && !(msg as { finalVerdict?: boolean }).finalVerdict && (
                         <>
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        className={`h-6 w-6 rounded-full ${msg.rating === 'up' ? 'text-green-600 bg-green-50 dark:bg-green-900/20' : 'text-muted-foreground'}`}
-                        onClick={() => handleRate(msg.id, "up")}
-                      >
-                        <ThumbsUp className="h-3 w-3" />
-                      </Button>
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        className={`h-6 w-6 rounded-full ${msg.rating === 'down' ? 'text-destructive bg-destructive/10' : 'text-muted-foreground'}`}
-                        onClick={() => handleRate(msg.id, "down")}
-                      >
-                        <ThumbsDown className="h-3 w-3" />
-                      </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className={`h-6 w-6 rounded-full ${msg.rating === "up" ? "text-green-600 bg-green-50 dark:bg-green-900/20" : "text-muted-foreground"}`}
+                            onClick={() => handleRate(msg.id, "up")}
+                          >
+                            <ThumbsUp className="h-3 w-3" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className={`h-6 w-6 rounded-full ${msg.rating === "down" ? "text-destructive bg-destructive/10" : "text-muted-foreground"}`}
+                            onClick={() => handleRate(msg.id, "down")}
+                          >
+                            <ThumbsDown className="h-3 w-3" />
+                          </Button>
                         </>
                       )}
                     </div>
                   </div>
                 )}
+
+                {msg.role === "assistant"
+                  && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === "answer"
+                  && (msg as { finalVerdict?: boolean }).finalVerdict && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.22, ease: "easeOut" }}
+                      className="mt-3 w-full max-w-md rounded-2xl border border-slate-200/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] px-4 py-4 shadow-[0_8px_24px_rgba(15,23,42,0.06)] ring-1 ring-white/60 backdrop-blur-sm"
+                    >
+                      <p className="text-sm font-semibold text-foreground tracking-tight">Did this resolve your issue?</p>
+                      <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                        Quick feedback helps us improve these answers. If you are still stuck, we can open a ticket for a human teammate.
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2 mt-3">
+                        <Button
+                          type="button"
+                          variant={msg.rating === "up" ? "default" : "outline"}
+                          size="sm"
+                          className="gap-1.5 rounded-full h-9"
+                          disabled={rateMessage.isPending}
+                          onClick={() => handleRate(msg.id, "up")}
+                        >
+                          <ThumbsUp className="h-3.5 w-3.5" />
+                          Helpful
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={msg.rating === "down" ? "destructive" : "outline"}
+                          size="sm"
+                          className="gap-1.5 rounded-full h-9"
+                          disabled={rateMessage.isPending}
+                          onClick={() => handleRate(msg.id, "down")}
+                        >
+                          <ThumbsDown className="h-3.5 w-3.5" />
+                          Not resolved
+                        </Button>
+                      </div>
+                      <div className="mt-3.5 pt-3 border-t border-border/60">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="w-full sm:w-auto gap-2 rounded-xl"
+                          disabled={isStreaming}
+                          onClick={() => {
+                            void requestTicketAfterFinalVerdict();
+                          }}
+                        >
+                          <Ticket className="h-3.5 w-3.5 shrink-0" />
+                          Open a support ticket
+                        </Button>
+                      </div>
+                    </motion.div>
+                  )}
                 
                 {msg.role === 'assistant' && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'ticket_created' && createdTicketIdOf(msg as { ticketId?: number | null; content: string }) && (
                   <div className="mt-2 bg-secondary/50 border border-secondary p-3 rounded-lg flex items-center justify-between w-full">
@@ -1504,6 +1665,81 @@ export default function Chat() {
         </div>
 
         <div className="p-4 bg-background border-t border-border">
+          {chatEndedWithTicket && currentId && (
+            <motion.div
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.22, ease: "easeOut" }}
+              className="max-w-4xl mx-auto mb-3 rounded-2xl border border-slate-200/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] px-4 py-4 shadow-[0_8px_24px_rgba(15,23,42,0.06)] ring-1 ring-white/60 backdrop-blur-sm"
+            >
+              <p className="text-sm font-semibold text-foreground tracking-tight">Rate this conversation</p>
+              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                A support ticket was created from this thread. Chat input is closed — share quick feedback on how this
+                conversation went.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <div
+                  className="flex items-center gap-1"
+                  role="group"
+                  aria-label="Conversation rating 1 to 5 stars"
+                  onMouseLeave={() => setStarRowHover(null)}
+                >
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      disabled={conversationFeedbackDone || rateMessage.isPending}
+                      className={cn(
+                        "rounded-md p-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                        !conversationFeedbackDone && "hover:bg-muted/80",
+                        (conversationFeedbackDone || rateMessage.isPending) && "opacity-70 cursor-default",
+                      )}
+                      title={`${n} of 5`}
+                      onClick={() => {
+                        if (!conversationFeedbackDone) {
+                          setConversationStarDraft(n);
+                        }
+                      }}
+                      onMouseEnter={() => {
+                        if (!conversationFeedbackDone) {
+                          setStarRowHover(n);
+                        }
+                      }}
+                    >
+                      <Star
+                        className={cn(
+                          "h-8 w-8 transition-colors",
+                          starHighlight != null && n <= starHighlight
+                            ? "fill-amber-400 text-amber-500"
+                            : "text-muted-foreground/35",
+                        )}
+                      />
+                    </button>
+                  ))}
+                </div>
+                {!conversationFeedbackDone && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="rounded-full gap-1.5"
+                    disabled={conversationStarDraft == null || rateMessage.isPending}
+                    onClick={() => {
+                      void submitConversationStarRating();
+                    }}
+                  >
+                    {rateMessage.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                    Submit feedback
+                  </Button>
+                )}
+                {conversationFeedbackDone ? (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-500">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    Thanks — feedback saved.
+                  </span>
+                ) : null}
+              </div>
+            </motion.div>
+          )}
           <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex flex-col gap-2">
             {imagePreviewUrl && (
               <div className="relative inline-flex self-start">
@@ -1534,7 +1770,7 @@ export default function Chat() {
                 type="button"
                 variant="ghost"
                 size="icon"
-                disabled={isStreaming || isDescribingImage}
+                disabled={isStreaming || isDescribingImage || chatEndedWithTicket}
                 className="absolute left-2 h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
                 aria-label="Attach image"
                 onClick={() => fileInputRef.current?.click()}
@@ -1543,16 +1779,29 @@ export default function Chat() {
               </Button>
               <Input
                 id="chat-input"
+                ref={chatInputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Describe the issue. I will investigate and ask follow-ups only when needed..."
+                placeholder={
+                  chatEndedWithTicket
+                    ? "This conversation is closed — your support ticket was created."
+                    : "Describe the issue. I will investigate and ask follow-ups only when needed..."
+                }
                 className="pl-11 pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
                 autoComplete="off"
+                disabled={isStreaming || isDescribingImage || chatEndedWithTicket}
+                aria-disabled={chatEndedWithTicket}
               />
               <Button
                 type="submit"
                 size="icon"
-                disabled={(!input.trim() && !imageFile) || isStreaming || isDescribingImage || createConvo.isPending}
+                disabled={
+                  (!input.trim() && !imageFile)
+                  || isStreaming
+                  || isDescribingImage
+                  || createConvo.isPending
+                  || chatEndedWithTicket
+                }
                 className="absolute right-2 h-10 w-10 rounded-lg"
               >
                 <Send className="h-4 w-4" />
