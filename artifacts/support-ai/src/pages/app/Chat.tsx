@@ -1664,153 +1664,161 @@ export default function Chat() {
           )}
         </div>
 
-        <div className="p-4 bg-background border-t border-border">
+        <div className="border-t border-border/80 bg-background/95 px-3 py-2 md:px-8 md:py-2.5 backdrop-blur-sm">
           {chatEndedWithTicket && currentId && (
             <motion.div
-              initial={{ opacity: 0, y: 6 }}
+              initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.22, ease: "easeOut" }}
-              className="max-w-4xl mx-auto mb-3 rounded-2xl border border-slate-200/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] px-4 py-4 shadow-[0_8px_24px_rgba(15,23,42,0.06)] ring-1 ring-white/60 backdrop-blur-sm"
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              className="max-w-4xl mx-auto mb-2 rounded-xl border border-border/60 bg-muted/25 px-3 py-2 shadow-sm ring-1 ring-black/[0.02] dark:ring-white/[0.04]"
             >
-              <p className="text-sm font-semibold text-foreground tracking-tight">Rate this conversation</p>
-              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                A support ticket was created from this thread. Chat input is closed — share quick feedback on how this
-                conversation went.
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                <div
-                  className="flex items-center gap-1"
-                  role="group"
-                  aria-label="Conversation rating 1 to 5 stars"
-                  onMouseLeave={() => setStarRowHover(null)}
-                >
-                  {[1, 2, 3, 4, 5].map((n) => (
-                    <button
-                      key={n}
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                <div className="flex min-w-0 items-start gap-2">
+                  <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
+                    <Ticket className="h-3.5 w-3.5" aria-hidden />
+                  </div>
+                  <div className="min-w-0 space-y-0.5">
+                    <p className="text-xs font-semibold leading-tight text-foreground">Rate this conversation</p>
+                    <p className="text-[11px] leading-snug text-muted-foreground">
+                      Ticket created — chat closed. How did we do?
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                  <div
+                    className="flex items-center gap-0"
+                    role="group"
+                    aria-label="Conversation rating 1 to 5 stars"
+                    onMouseLeave={() => setStarRowHover(null)}
+                  >
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        disabled={conversationFeedbackDone || rateMessage.isPending}
+                        className={cn(
+                          "rounded-md p-0.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+                          !conversationFeedbackDone && "hover:bg-background/80",
+                          (conversationFeedbackDone || rateMessage.isPending) && "cursor-default opacity-70",
+                        )}
+                        title={`${n} of 5`}
+                        onClick={() => {
+                          if (!conversationFeedbackDone) {
+                            setConversationStarDraft(n);
+                          }
+                        }}
+                        onMouseEnter={() => {
+                          if (!conversationFeedbackDone) {
+                            setStarRowHover(n);
+                          }
+                        }}
+                      >
+                        <Star
+                          className={cn(
+                            "h-[1.125rem] w-[1.125rem] transition-colors",
+                            starHighlight != null && n <= starHighlight
+                              ? "fill-amber-400 text-amber-500"
+                              : "text-muted-foreground/40",
+                          )}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                  {!conversationFeedbackDone ? (
+                    <Button
                       type="button"
-                      disabled={conversationFeedbackDone || rateMessage.isPending}
-                      className={cn(
-                        "rounded-md p-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                        !conversationFeedbackDone && "hover:bg-muted/80",
-                        (conversationFeedbackDone || rateMessage.isPending) && "opacity-70 cursor-default",
-                      )}
-                      title={`${n} of 5`}
+                      size="sm"
+                      className="h-7 gap-1 rounded-md px-2.5 text-[11px] font-medium"
+                      disabled={conversationStarDraft == null || rateMessage.isPending}
                       onClick={() => {
-                        if (!conversationFeedbackDone) {
-                          setConversationStarDraft(n);
-                        }
-                      }}
-                      onMouseEnter={() => {
-                        if (!conversationFeedbackDone) {
-                          setStarRowHover(n);
-                        }
+                        void submitConversationStarRating();
                       }}
                     >
-                      <Star
-                        className={cn(
-                          "h-8 w-8 transition-colors",
-                          starHighlight != null && n <= starHighlight
-                            ? "fill-amber-400 text-amber-500"
-                            : "text-muted-foreground/35",
-                        )}
-                      />
-                    </button>
-                  ))}
+                      {rateMessage.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                      Submit
+                    </Button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-500">
+                      <CheckCircle2 className="h-3 w-3 shrink-0" />
+                      Saved
+                    </span>
+                  )}
                 </div>
-                {!conversationFeedbackDone && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="rounded-full gap-1.5"
-                    disabled={conversationStarDraft == null || rateMessage.isPending}
-                    onClick={() => {
-                      void submitConversationStarRating();
-                    }}
-                  >
-                    {rateMessage.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                    Submit feedback
-                  </Button>
-                )}
-                {conversationFeedbackDone ? (
-                  <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-500">
-                    <CheckCircle2 className="h-3.5 w-3.5" />
-                    Thanks — feedback saved.
-                  </span>
-                ) : null}
               </div>
             </motion.div>
           )}
-          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex flex-col gap-2">
-            {imagePreviewUrl && (
-              <div className="relative inline-flex self-start">
-                <img
-                  src={imagePreviewUrl}
-                  alt="Attached image preview"
-                  className="h-20 w-auto max-w-[160px] rounded-lg border border-border object-cover shadow-sm"
-                />
-                <button
-                  type="button"
-                  onClick={clearImage}
-                  className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow"
-                  aria-label="Remove image"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            )}
-            <div className="relative flex items-center">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
-                className="hidden"
-                onChange={handleImageChange}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                disabled={isStreaming || isDescribingImage || chatEndedWithTicket}
-                className="absolute left-2 h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
-                aria-label="Attach image"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                {isDescribingImage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-              </Button>
-              <Input
-                id="chat-input"
-                ref={chatInputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={
-                  chatEndedWithTicket
-                    ? "This conversation is closed — your support ticket was created."
-                    : "Describe the issue. I will investigate and ask follow-ups only when needed..."
-                }
-                className="pl-11 pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
-                autoComplete="off"
-                disabled={isStreaming || isDescribingImage || chatEndedWithTicket}
-                aria-disabled={chatEndedWithTicket}
-              />
-              <Button
-                type="submit"
-                size="icon"
-                disabled={
-                  (!input.trim() && !imageFile)
-                  || isStreaming
-                  || isDescribingImage
-                  || createConvo.isPending
-                  || chatEndedWithTicket
-                }
-                className="absolute right-2 h-10 w-10 rounded-lg"
-              >
-                <Send className="h-4 w-4" />
-              </Button>
+          {chatEndedWithTicket ? (
+            <div className="max-w-4xl mx-auto flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-border/60 bg-muted/15 py-1.5 px-2 text-[11px] text-muted-foreground">
+              <Ticket className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+              <span>Replies are disabled — continue in your support ticket.</span>
             </div>
-          </form>
-          <div className="text-center mt-2 text-[11px] text-muted-foreground">
-            Helia AI can make mistakes. Consider verifying important information.
-          </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex flex-col gap-2">
+              {imagePreviewUrl && (
+                <div className="relative inline-flex self-start">
+                  <img
+                    src={imagePreviewUrl}
+                    alt="Attached image preview"
+                    className="h-20 w-auto max-w-[160px] rounded-lg border border-border object-cover shadow-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={clearImage}
+                    className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow"
+                    aria-label="Remove image"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+              <div className="relative flex items-center">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  className="hidden"
+                  onChange={handleImageChange}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={isStreaming || isDescribingImage}
+                  className="absolute left-2 h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
+                  aria-label="Attach image"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  {isDescribingImage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+                </Button>
+                <Input
+                  id="chat-input"
+                  ref={chatInputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Describe the issue. I will investigate and ask follow-ups only when needed..."
+                  className="pl-11 pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
+                  autoComplete="off"
+                  disabled={isStreaming || isDescribingImage}
+                />
+                <Button
+                  type="submit"
+                  size="icon"
+                  disabled={
+                    (!input.trim() && !imageFile)
+                    || isStreaming
+                    || isDescribingImage
+                    || createConvo.isPending
+                  }
+                  className="absolute right-2 h-10 w-10 rounded-lg"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              </div>
+            </form>
+          )}
+          <p className="max-w-4xl mx-auto mt-1.5 text-center text-[10px] leading-tight text-muted-foreground/90">
+            Helia AI can make mistakes. Verify important information.
+          </p>
         </div>
 
         <Dialog open={memoryGraphOpen} onOpenChange={setMemoryGraphOpen}>
