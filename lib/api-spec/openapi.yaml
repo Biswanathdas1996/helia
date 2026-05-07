@@ -829,6 +829,8 @@ components:
           type: ["string", "null"]
         createdBy:
           type: string
+        createdByName:
+          type: ["string", "null"]
         relatedMessageId:
           type: ["integer", "null"]
         lastUpdate:

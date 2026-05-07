@@ -1527,7 +1527,7 @@ export default function Chat() {
                         {segmentIdx === segments.length - 1 && (msg as { rewrittenQuery?: string | null }).rewrittenQuery && (
                           <div className="mt-4 pt-3 border-t border-border/50">
                             <p className="text-[11px] leading-snug text-muted-foreground/80">
-                              <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Rewritten query</span>
+                              <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Searching for:</span>
                               <span className="italic">{(msg as { rewrittenQuery?: string | null }).rewrittenQuery}</span>
                             </p>
                           </div>

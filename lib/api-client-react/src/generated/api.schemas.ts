@@ -294,6 +294,8 @@ export interface Ticket {
   externalId?: string | null;
   createdBy: string;
   /** @nullable */
+  createdByName?: string | null;
+  /** @nullable */
   relatedMessageId?: number | null;
   /** @nullable */
   lastUpdate?: string | null;

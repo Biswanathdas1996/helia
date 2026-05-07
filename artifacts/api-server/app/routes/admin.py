@@ -126,6 +126,242 @@ async def get_admin_trend(_: AuthedUser = Depends(require_admin)) -> list[dict[s
     return out
 
 
+@router.get("/admin/insights")
+async def get_admin_insights(_: AuthedUser = Depends(require_admin)) -> dict[str, object]:
+    """Aggregated AI/RAG telemetry powering the admin dashboard insights panels."""
+    db = await get_db()
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=14)
+
+    cursor = db.messages.find(
+        {"role": "assistant", "createdAt": {"$gte": since}},
+        {
+            "content": 1,
+            "citations": 1,
+            "canAnswer": 1,
+            "finalVerdict": 1,
+            "rating": 1,
+            "feedbackComment": 1,
+            "latencyMs": 1,
+            "createdAt": 1,
+            "conversationId": 1,
+            "kind": 1,
+            "ticketId": 1,
+        },
+    ).sort("createdAt", -1)
+    messages = await cursor.to_list(length=5000)
+
+    LOW_CONF = 0.60
+    total = len(messages)
+    latencies: list[int] = []
+    top_scores: list[float] = []
+    citation_counts: list[int] = []
+    grounded = refused = cited = verdicted = up = down = rated = 0
+    low_conf = no_results = 0
+    by_day_count: dict[str, int] = {}
+    by_day_lat_sum: dict[str, int] = {}
+    by_day_lat_n: dict[str, int] = {}
+
+    # Business outcome counters
+    ai_resolved = 0  # final grounded answers from the assistant
+    ticket_offers = 0  # assistant proposed escalation
+    tickets_from_chat = 0  # ticket actually created in-conversation
+    feedback_comments: list[dict[str, object]] = []
+
+    failed: list[dict[str, object]] = []
+
+    for m in messages:
+        lat = m.get("latencyMs")
+        lat_val = int(lat) if isinstance(lat, (int, float)) and lat > 0 else None
+        if lat_val is not None:
+            latencies.append(lat_val)
+
+        cits = m.get("citations") or []
+        citation_counts.append(len(cits))
+        top = 0.0
+        if cits:
+            cited += 1
+            scores = [float(c.get("score", 0)) for c in cits if isinstance(c, dict)]
+            if scores:
+                top = max(scores)
+                top_scores.append(top)
+                if top < LOW_CONF:
+                    low_conf += 1
+        else:
+            no_results += 1
+            low_conf += 1
+
+        ca = m.get("canAnswer")
+        if ca is True:
+            grounded += 1
+        elif ca is False:
+            refused += 1
+
+        if m.get("finalVerdict") is True:
+            verdicted += 1
+
+        rating = m.get("rating")
+        if rating == "up":
+            up += 1
+            rated += 1
+        elif rating == "down":
+            down += 1
+            rated += 1
+
+        comment = (m.get("feedbackComment") or "").strip() if isinstance(m.get("feedbackComment"), str) else ""
+        if comment and rating in ("up", "down") and len(feedback_comments) < 8:
+            feedback_comments.append(
+                {
+                    "id": str(m.get("_id")),
+                    "rating": rating,
+                    "comment": comment[:240],
+                    "createdAt": iso(m.get("createdAt")) if isinstance(m.get("createdAt"), datetime) else None,
+                }
+            )
+
+        kind = m.get("kind")
+        if kind == "ticket_created" or m.get("ticketId"):
+            tickets_from_chat += 1
+        elif kind == "ticket_offer":
+            ticket_offers += 1
+        elif kind == "answer" and (m.get("finalVerdict") is True or m.get("canAnswer") is True):
+            ai_resolved += 1
+
+        d = m.get("createdAt")
+        if isinstance(d, datetime):
+            key = d.strftime("%Y-%m-%d")
+            by_day_count[key] = by_day_count.get(key, 0) + 1
+            if lat_val is not None:
+                by_day_lat_sum[key] = by_day_lat_sum.get(key, 0) + lat_val
+                by_day_lat_n[key] = by_day_lat_n.get(key, 0) + 1
+
+        if (ca is False) or (not cits) or (top and top < LOW_CONF):
+            if len(failed) < 60:
+                failed.append({"_msg": m, "_top": top})
+
+    def pct(n: int, d: int) -> float:
+        return round(n / d * 100, 1) if d else 0.0
+
+    def percentile(vals: list[int], p: float) -> int:
+        if not vals:
+            return 0
+        s = sorted(vals)
+        k = max(0, min(len(s) - 1, int(round(p * (len(s) - 1)))))
+        return s[k]
+
+    avg_top_score = round(sum(top_scores) / len(top_scores), 3) if top_scores else 0.0
+    avg_citations = round(sum(citation_counts) / len(citation_counts), 2) if citation_counts else 0.0
+    avg_latency = round(sum(latencies) / len(latencies)) if latencies else 0
+
+    # Knowledge gaps: walk failed assistant messages, attach the prior user question, dedupe.
+    gap_items: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for entry in failed:
+        fa = entry["_msg"]
+        prev = await db.messages.find_one(
+            {
+                "conversationId": fa.get("conversationId"),
+                "role": "user",
+                "createdAt": {"$lt": fa.get("createdAt")},
+            },
+            sort=[("createdAt", -1)],
+        )
+        question = ((prev or {}).get("content") or "").strip()
+        if not question:
+            continue
+        norm = question.lower()[:120]
+        if norm in seen:
+            continue
+        seen.add(norm)
+        cits = fa.get("citations") or []
+        gap_items.append(
+            {
+                "id": str(fa.get("_id")),
+                "question": question[:240],
+                "topScore": round(float(entry["_top"] or 0), 3),
+                "citationCount": len(cits),
+                "canAnswer": fa.get("canAnswer"),
+                "createdAt": iso(fa.get("createdAt")),
+            }
+        )
+        if len(gap_items) >= 10:
+            break
+
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    daily: list[dict[str, object]] = []
+    for i in range(6, -1, -1):
+        d = today0 - timedelta(days=i)
+        key = d.strftime("%Y-%m-%d")
+        n = by_day_lat_n.get(key, 0)
+        lat = round(by_day_lat_sum.get(key, 0) / n) if n else 0
+        daily.append({"date": key, "queries": by_day_count.get(key, 0), "avgLatencyMs": lat})
+
+    # Tickets — resolved by human agent vs still pending the queue
+    tickets_resolved = await db.tickets.count_documents(
+        {"status": {"$in": ["resolved", "closed"]}, "createdAt": {"$gte": since}}
+    )
+    tickets_open = await db.tickets.count_documents(
+        {"status": {"$in": ["open", "in_progress"]}}
+    )
+    tickets_total = await db.tickets.count_documents({"createdAt": {"$gte": since}})
+
+    deflection_denominator = ai_resolved + tickets_from_chat
+    deflection_rate = pct(ai_resolved, deflection_denominator) if deflection_denominator else 0.0
+
+    return {
+        "windowDays": 14,
+        "business": {
+            "totalQueries": total,
+            "aiResolved": ai_resolved,
+            "ticketOffers": ticket_offers,
+            "ticketsCreatedFromChat": tickets_from_chat,
+            "ticketsResolvedByAgent": tickets_resolved,
+            "ticketsOpen": tickets_open,
+            "ticketsTotal": tickets_total,
+            "deflectionRate": deflection_rate,
+            "feedback": {
+                "up": up,
+                "down": down,
+                "rated": rated,
+                "helpfulRate": pct(up, rated),
+                "comments": feedback_comments,
+            },
+        },
+        "ragHealth": {
+            "avgTopScore": avg_top_score,
+            "lowConfidenceRate": pct(low_conf, total),
+            "noResultsRate": pct(no_results, total),
+            "avgCitationsUsed": avg_citations,
+            "sampleSize": total,
+            "lowConfidenceThreshold": LOW_CONF,
+        },
+        "llmTelemetry": {
+            "chatModel": llm.chat_model(),
+            "embeddingModel": llm.embedding_model(),
+            "avgLatencyMs": avg_latency,
+            "p50LatencyMs": percentile(latencies, 0.50),
+            "p95LatencyMs": percentile(latencies, 0.95),
+            "totalQueries": total,
+            "daily": daily,
+        },
+        "knowledgeGaps": gap_items,
+        "grounding": {
+            "totalAnswers": total,
+            "groundedAnswers": grounded,
+            "refusedAnswers": refused,
+            "citedAnswers": cited,
+            "groundingVerdicts": verdicted,
+            "helpfulCount": up,
+            "downvoteCount": down,
+            "ratedCount": rated,
+            "groundedRate": pct(grounded, total),
+            "citedRate": pct(cited, total),
+            "refusalRate": pct(refused, total),
+            "helpfulRate": pct(up, rated),
+        },
+    }
+
+
 @router.get("/admin/activity")
 async def get_admin_activity(_: AuthedUser = Depends(require_admin)) -> list[dict[str, object]]:
     db = await get_db()

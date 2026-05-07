@@ -27,13 +27,36 @@ def _parse_id(raw: str) -> int:
     return n
 
 
+def _format_user_name(u: dict[str, object]) -> str | None:
+    first = (u.get("firstName") or "").strip() if isinstance(u.get("firstName"), str) else ""
+    last = (u.get("lastName") or "").strip() if isinstance(u.get("lastName"), str) else ""
+    full = f"{first} {last}".strip()
+    if full:
+        return full
+    email = u.get("email")
+    return email if isinstance(email, str) and email else None
+
+
 @router.get("/tickets")
 async def list_tickets(user: AuthedUser = Depends(require_auth)) -> list[dict[str, object]]:
     db = await get_db()
     is_admin = user.role == "admin"
     flt: dict[str, object] = {} if is_admin else {"userId": user.userId}
     rows = await db.tickets.find(flt).sort("createdAt", -1).to_list(length=None)
-    return [serialize_ticket(r) for r in rows]
+    user_ids = {r.get("userId") for r in rows if r.get("userId")}
+    name_map: dict[str, str] = {}
+    if user_ids:
+        users = await db.users.find({"_id": {"$in": list(user_ids)}}).to_list(length=None)
+        for u in users:
+            name = _format_user_name(u)
+            if name:
+                name_map[u["_id"]] = name
+    out: list[dict[str, object]] = []
+    for r in rows:
+        t = serialize_ticket(r)
+        t["createdByName"] = name_map.get(r.get("userId"))
+        out.append(t)
+    return out
 
 
 @router.get("/tickets/zoho-synced")
