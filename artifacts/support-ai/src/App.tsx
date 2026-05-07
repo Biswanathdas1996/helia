@@ -22,6 +22,7 @@ import AdminDocumentDetail from "@/pages/admin/DocumentDetail";
 import AdminNewDocument from "@/pages/admin/NewDocument";
 import AdminTickets from "@/pages/admin/Tickets";
 import AdminZohoTickets from "@/pages/admin/ZohoTickets";
+import AdminArchitecture from "@/pages/admin/Architecture";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const queryClient = new QueryClient();
@@ -58,6 +59,7 @@ function ProtectedAdmin() {
     <AdminGuard>
       <Switch>
         <Route path="/admin" component={AdminDashboard} />
+        <Route path="/admin/architecture" component={AdminArchitecture} />
         <Route path="/admin/documents" component={AdminDocuments} />
         <Route path="/admin/documents/new" component={AdminNewDocument} />
         <Route path="/admin/documents/:id" component={AdminDocumentDetail} />

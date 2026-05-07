@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useGetAdminStats, useGetAdminTrend, useGetAdminActivity, useListDocuments } from "@workspace/api-client-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,6 +18,7 @@ import {
   Inbox,
   TrendingUp,
   Activity,
+  Info,
 } from "lucide-react";
 import { format } from "date-fns";
 import { Link } from "wouter";
@@ -24,6 +26,47 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+
+function AdminCardInfo({
+  title,
+  children,
+  contentSide = "bottom",
+  contentAlign = "start",
+}: {
+  title: string;
+  children: ReactNode;
+  contentSide?: "top" | "right" | "bottom" | "left";
+  contentAlign?: "start" | "center" | "end";
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full sm:h-7 sm:w-7",
+            "border border-border/55 bg-background/70 text-muted-foreground/80 shadow-sm shadow-black/[0.02]",
+            "backdrop-blur-sm transition-[color,background-color,border-color,box-shadow]",
+            "hover:border-border/80 hover:bg-muted/60 hover:text-foreground hover:shadow-black/[0.04]",
+            "dark:border-border/40 dark:bg-background/30 dark:shadow-black/20 dark:hover:border-border/55 dark:hover:bg-muted/35",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ring-offset-background",
+          )}
+          aria-label={`${title}: more info`}
+        >
+          <Info className="h-3 w-3 sm:h-3.5 sm:w-3.5" strokeWidth={1.75} aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align={contentAlign}
+        side={contentSide}
+        className="w-[min(22rem,calc(100vw-2rem))] border-border/80 p-3 text-left shadow-lg"
+      >
+        <p className="text-xs leading-relaxed text-muted-foreground">{children}</p>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 interface VectorIndexCoverage {
   total: number;
@@ -110,54 +153,72 @@ export default function AdminDashboard() {
           value: stats.totalQueries,
           icon: MessageSquare,
           accent: "text-blue-600 dark:text-blue-400",
-          tint: "bg-blue-500/[0.12] shadow-inner shadow-blue-500/10 ring-1 ring-blue-500/[0.12] dark:bg-blue-400/[0.14]",
-          glow: "bg-blue-500/25 dark:bg-blue-400/20",
-          bar: "from-blue-500/80 to-blue-600/60",
+          tint: "bg-blue-500/[0.09] ring-1 ring-blue-500/[0.12] dark:bg-blue-400/[0.11] dark:ring-blue-400/18",
+          stripe: "from-blue-500 via-blue-500/70 to-blue-600/60",
+          bar: "from-blue-500/70 to-blue-600/45",
+          glow: "bg-blue-500/[0.14] dark:bg-blue-400/[0.11]",
+          businessHint:
+            "How many times users have asked the assistant a question. Higher totals usually mean stronger self‑service adoption and less load on human agents. Pair this with Helpful rate to see whether volume reflects real value or frustration.",
         },
         {
           title: "Helpful rate",
           value: `${Math.round(stats.helpfulRate * 100)}%`,
           icon: CheckCircle2,
           accent: "text-emerald-600 dark:text-emerald-400",
-          tint: "bg-emerald-500/[0.12] shadow-inner shadow-emerald-500/10 ring-1 ring-emerald-500/[0.12] dark:bg-emerald-400/[0.14]",
-          glow: "bg-emerald-500/25 dark:bg-emerald-400/20",
-          bar: "from-emerald-500/80 to-emerald-600/55",
+          tint: "bg-emerald-500/[0.09] ring-1 ring-emerald-500/[0.12] dark:bg-emerald-400/[0.11] dark:ring-emerald-400/18",
+          stripe: "from-emerald-500 via-emerald-500/70 to-emerald-600/55",
+          bar: "from-emerald-500/70 to-emerald-600/40",
+          glow: "bg-emerald-500/[0.14] dark:bg-emerald-400/[0.11]",
+          businessHint:
+            "Share of user‑rated answers marked helpful. It is a direct signal of answer quality and trust. Use it to prioritize content gaps, model tuning, and which topics deserve richer knowledge articles.",
         },
         {
           title: "Active documents",
           value: stats.approvedDocuments,
           icon: FileText,
           accent: "text-indigo-600 dark:text-indigo-400",
-          tint: "bg-indigo-500/[0.12] shadow-inner shadow-indigo-500/10 ring-1 ring-indigo-500/[0.12] dark:bg-indigo-400/[0.14]",
-          glow: "bg-indigo-500/22 dark:bg-indigo-400/18",
-          bar: "from-indigo-500/80 to-indigo-600/55",
+          tint: "bg-indigo-500/[0.09] ring-1 ring-indigo-500/[0.12] dark:bg-indigo-400/[0.11] dark:ring-indigo-400/18",
+          stripe: "from-indigo-500 via-indigo-500/70 to-indigo-600/55",
+          bar: "from-indigo-500/70 to-indigo-600/40",
+          glow: "bg-indigo-500/[0.14] dark:bg-indigo-400/[0.11]",
+          businessHint:
+            "Knowledge sources approved for the assistant to use when answering. Each approved document expands what the bot can cite accurately. Stale or thin libraries here often show up as low helpful rates or rising tickets.",
         },
         {
           title: "Knowledge chunks",
           value: stats.totalChunks,
           icon: Zap,
           accent: "text-amber-600 dark:text-amber-400",
-          tint: "bg-amber-500/[0.14] shadow-inner shadow-amber-500/10 ring-1 ring-amber-500/[0.12] dark:bg-amber-400/[0.15]",
-          glow: "bg-amber-500/22 dark:bg-amber-400/18",
-          bar: "from-amber-500/80 to-amber-600/50",
+          tint: "bg-amber-500/[0.09] ring-1 ring-amber-500/[0.12] dark:bg-amber-400/[0.11] dark:ring-amber-400/18",
+          stripe: "from-amber-500 via-amber-500/70 to-amber-600/50",
+          bar: "from-amber-500/70 to-amber-600/38",
+          glow: "bg-amber-500/[0.14] dark:bg-amber-400/[0.11]",
+          businessHint:
+            "Searchable slices of your knowledge base that power retrieval. More chunks generally mean finer‑grained answers, but only if content stays accurate. It also reflects embedding and index work behind the scenes.",
         },
         {
           title: "Open tickets",
           value: stats.openTickets,
           icon: AlertCircle,
           accent: "text-orange-600 dark:text-orange-400",
-          tint: "bg-orange-500/[0.12] shadow-inner shadow-orange-500/10 ring-1 ring-orange-500/[0.12] dark:bg-orange-400/[0.14]",
-          glow: "bg-orange-500/24 dark:bg-orange-400/18",
-          bar: "from-orange-500/80 to-orange-600/50",
+          tint: "bg-orange-500/[0.09] ring-1 ring-orange-500/[0.12] dark:bg-orange-400/[0.11] dark:ring-orange-400/18",
+          stripe: "from-orange-500 via-orange-500/70 to-orange-600/50",
+          bar: "from-orange-500/70 to-orange-600/38",
+          glow: "bg-orange-500/[0.14] dark:bg-orange-400/[0.11]",
+          businessHint:
+            "Support cases not yet resolved. It is your live backlog and workload indicator. A growing count may mean the assistant or knowledge base is missing key answers, or that demand is outpacing team capacity.",
         },
         {
           title: "PII removed",
           value: stats.piiRemovedTotal,
           icon: Search,
           accent: "text-violet-600 dark:text-violet-400",
-          tint: "bg-violet-500/[0.12] shadow-inner shadow-violet-500/10 ring-1 ring-violet-500/[0.12] dark:bg-violet-400/[0.14]",
-          glow: "bg-violet-500/22 dark:bg-violet-400/18",
-          bar: "from-violet-500/80 to-violet-600/50",
+          tint: "bg-violet-500/[0.09] ring-1 ring-violet-500/[0.12] dark:bg-violet-400/[0.11] dark:ring-violet-400/18",
+          stripe: "from-violet-500 via-violet-500/70 to-violet-600/50",
+          bar: "from-violet-500/70 to-violet-600/38",
+          glow: "bg-violet-500/[0.14] dark:bg-violet-400/[0.11]",
+          businessHint:
+            "Count of personally identifiable or sensitive data detections scrubbed before content or answers go out. It supports privacy and compliance posture and shows how often risky data appears in your pipeline.",
         },
       ]
     : [];
@@ -264,65 +325,85 @@ export default function AdminDashboard() {
               ? Array.from({ length: 6 }, (_, i) => (
                   <div
                     key={i}
-                    className="relative overflow-hidden rounded-2xl border border-border/50 bg-muted/30 p-4 shadow-sm shadow-black/[0.02] dark:bg-muted/15 dark:shadow-black/25"
+                    className={cn(
+                      "relative overflow-hidden rounded-2xl border border-border/45 bg-card/60",
+                      "p-4 shadow-sm backdrop-blur-sm dark:bg-card/40 dark:shadow-black/20 sm:p-[1.125rem]",
+                    )}
                   >
-                    <Skeleton className="mb-3 h-3 w-[55%] rounded-md" />
-                    <Skeleton className="h-9 w-[40%] rounded-lg" />
+                    <Skeleton className="mb-4 h-3 w-[62%] rounded-md" />
+                    <Skeleton className="h-9 w-[48%] rounded-lg" />
+                    <Skeleton className="mt-5 h-1 w-full rounded-full" />
                   </div>
                 ))
               : kpis.map((kpi) => (
                   <div
                     key={kpi.title}
                     className={cn(
-                      "group relative overflow-hidden rounded-2xl border border-border/50 bg-card/90",
-                      "shadow-sm shadow-black/[0.03] backdrop-blur-sm transition-all duration-300",
-                      "hover:border-border hover:shadow-lg hover:shadow-black/[0.06] hover:-translate-y-0.5",
-                      "dark:bg-card/70 dark:shadow-black/30 dark:hover:shadow-black/40",
+                      "group relative overflow-hidden rounded-2xl border border-border/50 bg-card/85",
+                      "shadow-sm shadow-black/[0.02] backdrop-blur-md",
+                      "transition-[box-shadow,border-color,transform] duration-300 ease-out",
+                      "hover:-translate-y-0.5 hover:border-border/65 hover:shadow-md hover:shadow-black/[0.06]",
+                      "dark:bg-card/55 dark:shadow-black/25 dark:hover:border-border/55 dark:hover:shadow-lg dark:hover:shadow-black/35",
                     )}
                   >
                     <div
                       className={cn(
-                        "pointer-events-none absolute -right-10 -top-14 h-36 w-36 rounded-full blur-3xl transition-opacity duration-500",
-                        "opacity-70 group-hover:opacity-95",
+                        "pointer-events-none absolute -right-10 -top-14 h-36 w-36 rounded-full blur-3xl",
+                        "opacity-55 transition-opacity duration-300 group-hover:opacity-80",
                         kpi.glow,
                       )}
                       aria-hidden
                     />
                     <div
                       className={cn(
-                        "pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent opacity-70",
-                        "via-white/25 to-transparent dark:via-white/10",
+                        "pointer-events-none absolute left-0 top-0 bottom-0 w-[3px] bg-gradient-to-b opacity-90",
+                        kpi.stripe,
                       )}
                       aria-hidden
                     />
-                    <div className="relative px-4 pb-4 pt-3.5 sm:px-[1.125rem] sm:pb-[1.125rem] sm:pt-4">
-                      <div className="flex items-start justify-between gap-3">
+                    <div
+                      className={cn(
+                        "pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent",
+                        "via-white/45 to-transparent dark:via-white/[0.08]",
+                      )}
+                      aria-hidden
+                    />
+                    <div className="absolute bottom-2 right-2 z-10 sm:bottom-2.5 sm:right-2.5">
+                      <AdminCardInfo title={kpi.title} contentSide="top" contentAlign="end">
+                        {kpi.businessHint}
+                      </AdminCardInfo>
+                    </div>
+                    <div className="relative flex flex-col gap-3.5 p-4 pb-5 pr-[2.875rem] sm:gap-4 sm:p-[1.125rem] sm:pb-[1.35rem] sm:pr-[3rem]">
+                      <span
+                        className={cn(
+                          "pointer-events-none absolute right-4 top-4 z-[1]",
+                          "flex h-10 w-10 items-center justify-center rounded-2xl sm:right-[1.125rem] sm:top-[1.125rem] sm:h-9 sm:w-9",
+                          "shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-[1.04]",
+                          kpi.tint,
+                        )}
+                        aria-hidden
+                      >
+                        <kpi.icon className={cn("h-[1.0625rem] w-[1.0625rem] sm:h-[1.05rem] sm:w-[1.05rem]", kpi.accent)} strokeWidth={2} />
+                      </span>
+                      <div className="min-w-0 max-w-[calc(100%-3rem)] sm:max-w-none sm:pr-0">
                         <p className="text-[11px] font-medium leading-snug tracking-wide text-muted-foreground sm:text-xs">
                           {kpi.title}
                         </p>
-                        <span
-                          className={cn(
-                            "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl",
-                            kpi.tint,
-                          )}
-                        >
-                          <kpi.icon className={cn("h-4 w-4", kpi.accent)} strokeWidth={2} />
-                        </span>
                       </div>
-                      <p className="mt-3 tabular-nums text-2xl font-semibold leading-none tracking-tight text-foreground sm:text-[1.65rem]">
+                      <p className="tabular-nums text-[1.5rem] font-semibold leading-none tracking-tight text-foreground sm:text-[1.625rem]">
                         {kpi.value}
                       </p>
                       <div
                         className={cn(
-                          "pointer-events-none mt-4 h-0.5 w-full overflow-hidden rounded-full bg-muted/80",
-                          "dark:bg-muted/40",
+                          "pointer-events-none mt-0.5 h-1 w-full overflow-hidden rounded-full bg-muted/80",
+                          "dark:bg-muted/45",
                         )}
                         aria-hidden
                       >
                         <div
                           className={cn(
-                            "h-full w-3/5 rounded-full bg-gradient-to-r opacity-80 transition-[width] duration-500 ease-out",
-                            "group-hover:w-full group-hover:opacity-100",
+                            "h-full w-[52%] rounded-full bg-gradient-to-r opacity-80 transition-[width,opacity] duration-500 ease-out",
+                            "group-hover:w-[88%] group-hover:opacity-100",
                             kpi.bar,
                           )}
                         />
@@ -367,9 +448,16 @@ export default function AdminDashboard() {
                   <Database className="h-6 w-6 text-cyan-700 dark:text-cyan-300" strokeWidth={1.75} />
                 </div>
                 <div className="min-w-0 space-y-1">
-                  <CardTitle className="text-base font-semibold tracking-tight sm:text-lg">
-                    Vector index status
-                  </CardTitle>
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    <CardTitle className="text-base font-semibold tracking-tight sm:text-lg">
+                      Vector index status
+                    </CardTitle>
+                    <AdminCardInfo title="Vector index status">
+                      Whether your knowledge can be found semantically in MongoDB Atlas vector search. When the index is
+                      queryable and coverage is high, the assistant can match user questions to the right chunks. This card
+                      is your technical readiness signal before you invest in more content.
+                    </AdminCardInfo>
+                  </div>
                   <CardDescription className="text-[13px] leading-normal">
                     Atlas vector search readiness and chunk embedding coverage
                   </CardDescription>
@@ -554,7 +642,14 @@ export default function AdminDashboard() {
                     <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
                       Analytics
                     </p>
-                    <CardTitle className="text-base font-semibold tracking-tight sm:text-lg">Query volume</CardTitle>
+                    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                      <CardTitle className="text-base font-semibold tracking-tight sm:text-lg">Query volume</CardTitle>
+                      <AdminCardInfo title="Query volume">
+                        Daily assistant usage over the last two weeks. Spikes can follow launches, incidents, or marketing
+                        campaigns; sustained growth usually means self‑service is replacing repetitive agent work. Compare
+                        peaks to staffing and content changes to explain the pattern.
+                      </AdminCardInfo>
+                    </div>
                     <CardDescription className="text-[13px] leading-normal">
                       Last 14 days of assistant usage
                     </CardDescription>
@@ -686,7 +781,14 @@ export default function AdminDashboard() {
                 </div>
                 <div className="min-w-0 space-y-1 pr-2">
                   <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Inbox</p>
-                  <CardTitle className="text-base font-semibold tracking-tight sm:text-lg">Pending review</CardTitle>
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    <CardTitle className="text-base font-semibold tracking-tight sm:text-lg">Pending review</CardTitle>
+                    <AdminCardInfo title="Pending review">
+                      New knowledge uploads that still need a human gate before the assistant can use them. The queue size
+                      reflects editorial workload and risk control: approving good content improves answers, while holding
+                      back unsafe or duplicate material protects users and brand.
+                    </AdminCardInfo>
+                  </div>
                   <CardDescription className="line-clamp-2 text-[13px]">Documents awaiting approval</CardDescription>
                 </div>
               </div>
@@ -798,7 +900,14 @@ export default function AdminDashboard() {
                   <p className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground sm:text-[11px]">
                     Live feed
                   </p>
-                  <CardTitle className="text-[15px] font-semibold tracking-tight sm:text-base">Recent activity</CardTitle>
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    <CardTitle className="text-[15px] font-semibold tracking-tight sm:text-base">Recent activity</CardTitle>
+                    <AdminCardInfo title="Recent activity">
+                      A chronological audit trail for the support AI program: uploads, approvals, chat queries answered, and
+                      tickets opened. Use it to spot operational rhythm, who is taking action, and whether content or volume
+                      shifts line up with issues your team is seeing.
+                    </AdminCardInfo>
+                  </div>
                   <CardDescription className="text-xs leading-snug sm:text-[13px] sm:leading-normal">
                     Latest actions across tickets, documents, and queries
                   </CardDescription>
