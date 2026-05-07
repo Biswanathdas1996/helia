@@ -34,22 +34,30 @@ def default_tenant() -> str:
     return os.environ.get("DEFAULT_TENANT", "default") or "default"
 
 
+def tenant_from_email(email: Optional[str]) -> str:
+    """Derive a tenant id from an email's domain (`alice@acme.com` → `acme`)."""
+    e = (email or "").strip().lower()
+    if "@" in e:
+        domain = e.split("@", 1)[1]
+        if domain:
+            return domain.split(".", 1)[0] or default_tenant()
+    return default_tenant()
+
+
 def tenant_for(user: AuthedUser, *, override: Optional[dict] = None) -> str:
     """Resolve the tenant id for a request.
 
     Order:
       1. Explicit override (e.g. user document field) when provided.
-      2. Email domain prefix (`alice@acme.com` → `acme`).
-      3. ``DEFAULT_TENANT`` env.
+      2. ``user.tenantId`` stored on the user document.
+      3. Email domain prefix (`alice@acme.com` → `acme`).
+      4. ``DEFAULT_TENANT`` env.
     """
     if override and isinstance(override.get("tenantId"), str) and override["tenantId"]:
         return override["tenantId"]
-    email = (user.email or "").strip().lower()
-    if "@" in email:
-        domain = email.split("@", 1)[1]
-        if domain:
-            return domain.split(".", 1)[0] or default_tenant()
-    return default_tenant()
+    if isinstance(user.tenantId, str) and user.tenantId:
+        return user.tenantId
+    return tenant_from_email(user.email)
 
 
 def normalize_governance(

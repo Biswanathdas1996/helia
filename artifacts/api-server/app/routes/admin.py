@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from app import embeddings as emb_lib
 from app import llm
@@ -10,8 +12,22 @@ from app.audit import audit_log
 from app.auth import AuthedUser, require_admin
 from app.db import get_db
 from app.serialize import iso
+from app.tenant import tenant_for, tenant_from_email
 
 router = APIRouter()
+
+
+def _tenant_id_from_user_doc(doc: dict[str, object]) -> str:
+    tid = doc.get("tenantId")
+    if isinstance(tid, str) and tid.strip():
+        return tid.strip()
+    email = doc.get("email")
+    return tenant_from_email(email if isinstance(email, str) else None)
+
+
+class SetUserRoleBody(BaseModel):
+    email: str = Field(min_length=1)
+    role: Literal["admin", "user"]
 
 
 @router.get("/admin/stats")
@@ -171,6 +187,43 @@ async def get_admin_activity(_: AuthedUser = Depends(require_admin)) -> list[dic
 
     items.sort(key=lambda x: x["createdAt"], reverse=True)  # type: ignore[arg-type,return-value]
     return items[:25]
+
+
+# ---------------------------------------------------------------------------
+# User roles (within tenant)
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/admin/users/role")
+async def set_user_role(body: SetUserRoleBody, admin: AuthedUser = Depends(require_admin)) -> dict[str, object]:
+    """Promote or demote a user in your organization so they can access admin workflows."""
+    normalized = body.email.strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Invalid email")
+
+    db = await get_db()
+    target = await db.users.find_one({"email": normalized})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    actor_tenant = tenant_for(admin)
+    if _tenant_id_from_user_doc(target) != actor_tenant:
+        raise HTTPException(status_code=403, detail="Not allowed for users outside your organization")
+
+    if str(target["_id"]) == admin.userId and body.role == "user":
+        raise HTTPException(status_code=400, detail="Use another admin to remove your own admin access")
+
+    await db.users.update_one(
+        {"_id": target["_id"]},
+        {"$set": {"role": body.role, "updatedAt": datetime.now(timezone.utc)}},
+    )
+    await audit_log(
+        action="admin.users.set_role",
+        actor=admin.email or admin.userId,
+        target=str(target["_id"]),
+        meta={"email": normalized, "role": body.role},
+    )
+    return {"userId": str(target["_id"]), "email": normalized, "role": body.role}
 
 
 # ---------------------------------------------------------------------------

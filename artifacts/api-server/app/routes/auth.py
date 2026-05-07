@@ -20,6 +20,7 @@ from app.auth import (
     verify_password,
 )
 from app.db import get_db, next_id
+from app.tenant import tenant_from_email
 
 router = APIRouter()
 
@@ -86,6 +87,16 @@ async def register(body: RegisterBody, request: Request, response: Response) -> 
 
     is_first_user = (await db.users.count_documents({}, limit=1)) == 0
 
+    if is_first_user:
+        tenant_id = tenant_from_email(email)
+    else:
+        first = await db.users.find_one({}, sort=[("createdAt", 1)])
+        first_tenant = first.get("tenantId") if first else None
+        if isinstance(first_tenant, str) and first_tenant:
+            tenant_id = first_tenant
+        else:
+            tenant_id = tenant_from_email(first.get("email") if first else None)
+
     now = datetime.now(timezone.utc)
     user_id = str(await next_id("users"))
     user = {
@@ -96,6 +107,7 @@ async def register(body: RegisterBody, request: Request, response: Response) -> 
         "imageUrl": None,
         "passwordHash": hash_password(body.password),
         "role": "admin" if is_first_user else "user",
+        "tenantId": tenant_id,
         "createdAt": now,
         "updatedAt": now,
     }

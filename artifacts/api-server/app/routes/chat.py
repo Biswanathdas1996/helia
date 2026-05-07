@@ -424,6 +424,8 @@ async def send_message(
             intent="ticket_created",
             kind="ticket_created",
             ticket_id=ticket["_id"],
+            user_id=user.userId,
+            user_text=body.content,
         )
         return {
             "userMessage": serialize_message(user_msg),
@@ -432,7 +434,9 @@ async def send_message(
 
     if await _should_acknowledge_resolution(db, cid, body.content):
         await _persist_agent_state(db, cid, _resolution_state(agent_state, body.content))
-        assistant_msg = await _persist_resolution_acknowledgement(db, cid, started)
+        assistant_msg = await _persist_resolution_acknowledgement(
+            db, cid, started, user_id=user.userId, user_text=body.content
+        )
         return {
             "userMessage": serialize_message(user_msg),
             "assistantMessage": serialize_message(assistant_msg),
@@ -442,7 +446,8 @@ async def send_message(
         status_filter = _extract_ticket_status_filter(body.content)
         tickets = await _fetch_user_tickets(db, user.userId, status=status_filter)
         assistant_msg = await _persist_tickets_list_reply(
-            db, cid, started, tickets, status=status_filter
+            db, cid, started, tickets, status=status_filter,
+            user_id=user.userId, user_text=body.content,
         )
         return {
             "userMessage": serialize_message(user_msg),
@@ -459,7 +464,9 @@ async def send_message(
                 "lastQuestion": None,
             },
         )
-        assistant_msg = await _persist_ticket_intent_reply(db, cid, started)
+        assistant_msg = await _persist_ticket_intent_reply(
+            db, cid, started, user_id=user.userId, user_text=body.content
+        )
         return {
             "userMessage": serialize_message(user_msg),
             "assistantMessage": serialize_message(assistant_msg),
@@ -494,6 +501,8 @@ async def send_message(
             rewritten_query=retrieval.rewritten_query,
             intent="clarification_question",
             kind="clarification_question",
+            user_id=user.userId,
+            user_text=body.content,
         )
         return {
             "userMessage": serialize_message(user_msg),
@@ -513,6 +522,8 @@ async def send_message(
             rewritten_query=retrieval.rewritten_query,
             intent="investigation_ticket_offer",
             kind="ticket_offer",
+            user_id=user.userId,
+            user_text=body.content,
         )
         return {
             "userMessage": serialize_message(user_msg),
@@ -549,6 +560,8 @@ async def send_message(
             intent="ticket_created",
             kind="ticket_created",
             ticket_id=ticket["_id"],
+            user_id=user.userId,
+            user_text=body.content,
         )
         return {
             "userMessage": serialize_message(user_msg),
@@ -607,8 +620,9 @@ async def send_message(
         intent=response_intent,
         kind=message_kind,
         final_verdict=final_verdict,
+        user_id=user.userId,
+        user_text=body.content,
     )
-    await agent_memory.add_exchange_memory(user.userId, body.content, answer)
 
     return {
         "userMessage": serialize_message(user_msg),
@@ -702,6 +716,8 @@ async def send_message_stream(
                 intent="ticket_created",
                 kind="ticket_created",
                 ticket_id=ticket["_id"],
+                user_id=user.userId,
+                user_text=body.content,
             )
             yield _sse("process", {"name": "Creating support ticket", "status": "completed"})
             yield _sse("process", {"name": "Completed", "status": "completed"})
@@ -717,7 +733,9 @@ async def send_message_stream(
             yield _sse("citations", [])
             for chunk in _RESOLUTION_ACKNOWLEDGEMENT.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
-            assistant_msg = await _persist_resolution_acknowledgement(db, cid, started)
+            assistant_msg = await _persist_resolution_acknowledgement(
+                db, cid, started, user_id=user.userId, user_text=body.content
+            )
             yield _sse("process", {"name": "Acknowledging resolution", "status": "completed"})
             yield _sse("process", {"name": "Completed", "status": "completed"})
             yield _sse("done", serialize_message(assistant_msg))
@@ -735,7 +753,8 @@ async def send_message_stream(
             for chunk in tickets_reply.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
             assistant_msg = await _persist_tickets_list_reply(
-                db, cid, started, tickets, status=status_filter
+                db, cid, started, tickets, status=status_filter,
+                user_id=user.userId, user_text=body.content,
             )
             yield _sse("process", {"name": "Fetching your tickets", "status": "completed"})
             yield _sse("process", {"name": "Completed", "status": "completed"})
@@ -759,7 +778,9 @@ async def send_message_stream(
             yield _sse("citations", [])
             for chunk in _TICKET_INTENT_RESPONSE.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
-            assistant_msg = await _persist_ticket_intent_reply(db, cid, started)
+            assistant_msg = await _persist_ticket_intent_reply(
+                db, cid, started, user_id=user.userId, user_text=body.content
+            )
             yield _sse("process", {"name": "Preparing escalation guidance", "status": "completed"})
             yield _sse("process", {"name": "Completed", "status": "completed"})
             yield _sse("done", serialize_message(assistant_msg))
@@ -818,6 +839,8 @@ async def send_message_stream(
                 rewritten_query=retrieval.rewritten_query,
                 intent="clarification_question",
                 kind="clarification_question",
+                user_id=user.userId,
+                user_text=body.content,
             )
             yield _sse("process", {"name": "Asking a clarifying question", "status": "completed"})
             yield _sse("process", {"name": "Completed", "status": "completed"})
@@ -838,6 +861,8 @@ async def send_message_stream(
                 rewritten_query=retrieval.rewritten_query,
                 intent="investigation_ticket_offer",
                 kind="ticket_offer",
+                user_id=user.userId,
+                user_text=body.content,
             )
             yield _sse("process", {"name": "Preparing escalation guidance", "status": "completed"})
             yield _sse("process", {"name": "Completed", "status": "completed"})
@@ -878,6 +903,8 @@ async def send_message_stream(
                 intent="ticket_created",
                 kind="ticket_created",
                 ticket_id=ticket["_id"],
+                user_id=user.userId,
+                user_text=body.content,
             )
             yield _sse("process", {"name": "Creating support ticket", "status": "completed"})
             yield _sse("process", {"name": "Completed", "status": "completed"})
@@ -966,8 +993,9 @@ async def send_message_stream(
             intent=response_intent,
             kind=message_kind,
             final_verdict=final_verdict,
+            user_id=user.userId,
+            user_text=body.content,
         )
-        await agent_memory.add_exchange_memory(user.userId, body.content, answer)
         yield _sse("process", {"name": "Saving assistant response", "status": "completed"})
         yield _sse("process", {"name": "Completed", "status": "completed"})
         yield _sse("done", serialize_message(assistant_msg))
@@ -1068,6 +1096,8 @@ async def _persist_tickets_list_reply(
     tickets: list[dict[str, object]],
     *,
     status: str | None = None,
+    user_id: str | None = None,
+    user_text: str | None = None,
 ) -> dict:
     return await _persist_assistant_message(
         db,
@@ -1079,6 +1109,8 @@ async def _persist_tickets_list_reply(
         rewritten_query=None,
         intent="list_tickets",
         kind="tickets_list",
+        user_id=user_id,
+        user_text=user_text,
     )
 
 
@@ -1120,7 +1152,14 @@ def _resolution_state(agent_state: dict[str, object], user_text: str) -> dict[st
     }
 
 
-async def _persist_resolution_acknowledgement(db, cid: int, started: float) -> dict:
+async def _persist_resolution_acknowledgement(
+    db,
+    cid: int,
+    started: float,
+    *,
+    user_id: str | None = None,
+    user_text: str | None = None,
+) -> dict:
     return await _persist_assistant_message(
         db,
         cid,
@@ -1131,6 +1170,8 @@ async def _persist_resolution_acknowledgement(db, cid: int, started: float) -> d
         rewritten_query=None,
         intent="resolution_acknowledgement",
         kind="resolution_acknowledgement",
+        user_id=user_id,
+        user_text=user_text,
     )
 
 
@@ -1154,7 +1195,14 @@ async def _planner_state_with_unresolved_signal(
     return {**agent_state, "lastUnresolvedSignal": signal}
 
 
-async def _persist_ticket_intent_reply(db, cid: int, started: float) -> dict:
+async def _persist_ticket_intent_reply(
+    db,
+    cid: int,
+    started: float,
+    *,
+    user_id: str | None = None,
+    user_text: str | None = None,
+) -> dict:
     return await _persist_assistant_message(
         db,
         cid,
@@ -1165,6 +1213,8 @@ async def _persist_ticket_intent_reply(db, cid: int, started: float) -> dict:
         rewritten_query=None,
         intent="ticket_request",
         kind="ticket_offer",
+        user_id=user_id,
+        user_text=user_text,
     )
 
 
@@ -1525,6 +1575,8 @@ async def _persist_assistant_message(
     kind: str,
     ticket_id: int | None = None,
     final_verdict: bool = False,
+    user_id: str | None = None,
+    user_text: str | None = None,
 ) -> dict:
     assistant_msg = {
         "_id": await next_id("messages"),
@@ -1545,6 +1597,8 @@ async def _persist_assistant_message(
     if final_verdict:
         assistant_msg["finalVerdict"] = True
     await db.messages.insert_one(assistant_msg)
+    if user_id and user_text and content:
+        await agent_memory.add_exchange_memory(user_id, user_text, content)
     return assistant_msg
 
 

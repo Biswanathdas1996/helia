@@ -34,7 +34,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   const adminNavItems = me?.role === "admin" ? [
     { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
-    { href: "/admin/architecture", label: "Architecture", icon: Network },
+    // { href: "/admin/architecture", label: "Architecture", icon: Network },
     { href: "/admin/documents", label: "Documents", icon: FileText },
     { href: "/admin/documents/new", label: "Upload Document", icon: UploadCloud },
     { href: "/admin/tickets", label: "Admin Tickets", icon: TicketIcon },
