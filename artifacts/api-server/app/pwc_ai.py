@@ -26,6 +26,20 @@ def _default_reasoning_effort() -> str:
     return raw if raw in {"low", "medium", "high"} else "medium"
 
 
+def _openai_json_response_format_enabled() -> bool:
+    """Whether to send ``response_format: {\"type\": \"json_object\"}``.
+
+    The PwC GenAI gateway commonly returns **400** for this field; callers
+    still pass ``json_mode=True`` to mean "the prompt requests JSON", and we
+    rely on parsing (fences, brace extraction) without API-level JSON mode.
+
+    Set ``PWC_USE_OPENAI_JSON_MODE=1`` when your deployment actually supports
+    OpenAI-style structured outputs.
+    """
+    raw = (os.environ.get("PWC_USE_OPENAI_JSON_MODE") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 class ChatTurn(TypedDict):
     role: Literal["system", "user", "assistant"]
     content: str
@@ -70,13 +84,15 @@ async def chat(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    if json_mode:
+    # json_mode=True means the *prompt* asks for JSON; we only add OpenAI
+    # response_format when explicitly opted in (gateway often rejects it).
+    if json_mode and _openai_json_response_format_enabled():
         body["response_format"] = {"type": "json_object"}
     if reasoning:
         body["reasoning_effort"] = _default_reasoning_effort()
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        res, body = await _post_chat_with_json_fallback(client, body, json_mode=json_mode)
+        res, body = await _post_chat_with_json_fallback(client, body)
 
         if res.status_code >= 400 and (
             _is_unsupported_model_error(res.status_code, res.text)
@@ -94,7 +110,6 @@ async def chat(
                 retry_res, retry_body = await _post_chat_with_json_fallback(
                     client,
                     retry_body,
-                    json_mode=json_mode,
                 )
                 if retry_res.status_code < 400:
                     res = retry_res
@@ -111,8 +126,6 @@ async def chat(
 async def _post_chat_with_json_fallback(
     client: httpx.AsyncClient,
     body: dict[str, Any],
-    *,
-    json_mode: bool,
 ) -> tuple[httpx.Response, dict[str, Any]]:
     res = await client.post(f"{BASE_URL}/chat/completions", headers=_headers(), json=body)
     if res.status_code >= 400 and "reasoning_effort" in body:
@@ -121,10 +134,10 @@ async def _post_chat_with_json_fallback(
             log.warning("reasoning_effort rejected by gateway/model; retrying without it")
             body = {k: v for k, v in body.items() if k != "reasoning_effort"}
             res = await client.post(f"{BASE_URL}/chat/completions", headers=_headers(), json=body)
-    if json_mode and res.status_code >= 400:
+    # Only retry stripping response_format when we actually sent it (opt-in via
+    # PWC_USE_OPENAI_JSON_MODE).
+    if "response_format" in body and res.status_code >= 400:
         detail = res.text[:500]
-        # Some deployments may reject response_format even when the request is
-        # otherwise valid. Retry once without response_format.
         model = str(body.get("model") or "")
         if _should_retry_without_response_format(res.status_code, detail) or model.endswith("-image"):
             log.warning(

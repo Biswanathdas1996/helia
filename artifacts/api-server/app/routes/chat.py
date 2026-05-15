@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -27,6 +28,31 @@ router = APIRouter()
 log = logging.getLogger("api-server.chat")
 
 _RETRIEVAL_CACHE_TTL = 300
+# Hard ceiling on grounding/on-topic verifier wall time. The streamed answer
+# is already visible to the user by the time we reach the verifier, so a
+# transient slow verifier must never block the perceived response. On
+# timeout we fail-open and keep the streamed answer.
+_VERIFIER_TIMEOUT_S = 6.0
+
+
+def _answer_uses_reasoning() -> bool:
+    """Extra model reasoning adds noticeable time-to-first-token on voice/chat.
+
+    Default off so streamed answers and non-stream replies start quickly; set
+    ``HELIA_ANSWER_REASONING=1`` when quality trade-offs favour latency.
+    """
+    raw = (os.environ.get("HELIA_ANSWER_REASONING") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _schedule_await(awaitable):
+    """Schedule concurrent work from the current event loop.
+
+    Motor / PyMongo ``find_one`` (and some other helpers) return a bare
+    ``asyncio.Future``, not a coroutine — ``asyncio.create_task`` rejects
+    those on Python 3.10+. :func:`asyncio.ensure_future` accepts both.
+    """
+    return asyncio.ensure_future(awaitable)
 _MEMORY_GRAPH_QUERY_FALLBACK = "user preferences profile support history"
 _TICKET_INTENT_PATTERNS = [
     re.compile(r"\b(create|raise|open|file|submit|log|start)\s+(a\s+|an\s+|the\s+|new\s+)*(support\s+)?ticket\b", re.IGNORECASE),
@@ -34,11 +60,6 @@ _TICKET_INTENT_PATTERNS = [
     re.compile(r"\bescalate\b.*\b(ticket|human|agent|support)\b", re.IGNORECASE),
     re.compile(r"\b(want|need|like)\s+to\s+(create|open|raise|file|submit)\s+(a\s+|an\s+|the\s+|new\s+)*(support\s+)?ticket\b", re.IGNORECASE),
 ]
-_TICKET_INTENT_RESPONSE = (
-    "Of course — I can help you open a support ticket so a human teammate can follow up. "
-    "Reply \"yes, create a ticket\" and I will create it with a summary of this investigation, "
-    "Thanks for contacting us."
-)
 _LIST_TICKETS_INTENT_PATTERNS = [
     re.compile(r"\b(view|show|see|list|display|fetch|get|check|pull\s*up|bring\s*up)\b[^.\n]{0,40}\b(my\s+)?(support\s+|open\s+)?tickets?\b", re.IGNORECASE),
     re.compile(r"\b(my|all)\s+(support\s+|open\s+)?tickets?\b", re.IGNORECASE),
@@ -50,10 +71,6 @@ _TICKET_STATUS_FILTER_PATTERNS: list[tuple["re.Pattern[str]", str]] = [
     (re.compile(r"\b(closed|resolved|completed)\b", re.IGNORECASE), "closed"),
     (re.compile(r"\bopen\b", re.IGNORECASE), "open"),
 ]
-_LIST_TICKETS_EMPTY_REPLY = (
-    "You don't have any support tickets yet. If something's blocking you, tell me what's going on "
-    "and I can open one for you."
-)
 _TICKET_CONSENT_PATTERNS = [
     re.compile(r"\b(yes|yep|yeah|sure|okay|ok|please|go ahead|do it|proceed|confirm)\b", re.IGNORECASE),
     re.compile(r"\b(create|open|raise|file|submit)\s+(a\s+|an\s+|the\s+)?(support\s+)?ticket\b", re.IGNORECASE),
@@ -61,10 +78,6 @@ _TICKET_CONSENT_PATTERNS = [
 _TICKET_DECLINE_PATTERNS = [
     re.compile(r"\b(no|nah|not now|don't|do not|stop|cancel|no thanks)\b", re.IGNORECASE),
 ]
-_TICKET_OFFER_APPENDIX = (
-    "If this is still blocking you, I can open a support ticket so a human teammate can pick it up — "
-    "just reply \"yes, create a ticket\" and I'll do it."
-)
 _UNANSWERABLE_PATTERNS = [
     "do not contain information",
     "cannot answer",
@@ -142,9 +155,155 @@ _RESOLVED_SIGNAL_PATTERNS = [
     re.compile(r"\bproblem\s+solved\b", re.IGNORECASE),
 ]
 _RESOLUTION_PRIOR_KINDS = {"clarification_question", "answer", "ticket_offer"}
-_RESOLUTION_ACKNOWLEDGEMENT = (
-    "Wonderful — really glad that sorted it. "
-    "If anything else comes up, just message me here and I'll take another look."
+
+_CASUAL_GREETING_MAX_LEN = 52
+_CASUAL_GREETING_MAX_WORDS = 7
+
+
+def _reply_language(user_text: str | None) -> str:
+    return chat_agent.detect_reply_language(user_text)
+
+
+def _ticket_intent_response(user_text: str | None) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        return (
+            "ज़रूर — मैं आपके लिए एक सपोर्ट टिकट खोलने में मदद कर सकता हूं ताकि हमारी मानव टीम आगे फॉलो अप कर सके। "
+            "बस \"yes, create a ticket\" लिखकर जवाब दें, मैं इस जांच का सार जोड़कर टिकट बना दूंगा।"
+        )
+    if language == "bn":
+        return (
+            "অবশ্যই — আমি আপনার জন্য একটি সাপোর্ট টিকিট খুলতে সাহায্য করতে পারি যাতে মানব টিম পরে ফলো আপ করতে পারে। "
+            "শুধু \"yes, create a ticket\" লিখে উত্তর দিন, আমি এই তদন্তের সারাংশ দিয়ে টিকিট তৈরি করে দেব।"
+        )
+    return (
+        "Of course — I can help you open a support ticket so a human teammate can follow up. "
+        "Reply \"yes, create a ticket\" and I will create it with a summary of this investigation."
+    )
+
+
+def _list_tickets_empty_reply(user_text: str | None) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        return "आपके पास अभी कोई सपोर्ट टिकट नहीं है। अगर कुछ अटका हुआ है, तो मुझे बताइए, मैं आपके लिए एक टिकट खोल सकता हूं।"
+    if language == "bn":
+        return "আপনার এখনো কোনো সাপোর্ট টিকিট নেই। কিছু আটকে থাকলে বলুন, আমি আপনার জন্য একটি টিকিট খুলে দিতে পারি।"
+    return (
+        "You don't have any support tickets yet. If something's blocking you, tell me what's going on "
+        "and I can open one for you."
+    )
+
+
+def _ticket_offer_appendix(user_text: str | None) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        return "अगर यह अभी भी आपको रोक रहा है, तो मैं एक सपोर्ट टिकट खोल सकता हूं ताकि हमारी मानव टीम इसे संभाल सके — बस \"yes, create a ticket\" लिखकर जवाब दें।"
+    if language == "bn":
+        return "এতে যদি এখনো কাজ আটকে থাকে, আমি একটি সাপোর্ট টিকিট খুলে দিতে পারি যাতে মানব টিম এটা নিতে পারে — শুধু \"yes, create a ticket\" লিখে উত্তর দিন।"
+    return (
+        "If this is still blocking you, I can open a support ticket so a human teammate can pick it up — "
+        "just reply \"yes, create a ticket\" and I'll do it."
+    )
+
+
+def _resolution_acknowledgement(user_text: str | None) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        return "बहुत बढ़िया — यह ठीक हो गया, यह जानकर खुशी हुई। अगर आगे कुछ और आए, तो यहीं संदेश भेजिए, मैं फिर देख लूंगा।"
+    if language == "bn":
+        return "দারুণ — সমস্যাটা মিটেছে জেনে ভালো লাগল। পরে আর কিছু হলে এখানেই লিখুন, আমি আবার দেখে দেব।"
+    return (
+        "Wonderful — really glad that sorted it. "
+        "If anything else comes up, just message me here and I'll take another look."
+    )
+
+
+def _casual_greeting_reply(user_text: str | None) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        return "नमस्ते! मैं ठीक हूं और मदद के लिए यहां हूं। आज मैं आपकी किस बात में मदद कर सकता हूं?"
+    if language == "bn":
+        return "হ্যালো! আমি ভালো আছি এবং সাহায্য করতে প্রস্তুত। আজ আমি কীভাবে আপনাকে সাহায্য করতে পারি?"
+    return "Hello! I'm doing well and I'm here to help. What can I assist you with today?"
+
+
+def _ungrounded_fallback(user_text: str | None) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        return (
+            "माफ कीजिए — मुझे हमारी नॉलेज बेस में इसके लिए सत्यापित स्टेप्स नहीं मिले, इसलिए मैं मेनू या सेटिंग्स के बारे में अनुमान नहीं लगाना चाहता। "
+            "अगर आप चाहें, तो मैं एक सपोर्ट टिकट खोल सकता हूं ताकि हमारी मानव टीम इसे आगे संभाल सके — बस \"yes, create a ticket\" लिखकर जवाब दें।"
+        )
+    if language == "bn":
+        return (
+            "দুঃখিত — আমাদের নলেজ বেসে এর জন্য যাচাই করা ধাপ পাইনি, তাই মেনু বা সেটিংস নিয়ে আন্দাজ করতে চাই না। "
+            "চাইলে আমি একটি সাপোর্ট টিকিট খুলে দিতে পারি যাতে মানব টিম এটা এগিয়ে নিতে পারে — শুধু \"yes, create a ticket\" লিখে উত্তর দিন।"
+        )
+    return (
+        "Sorry — I couldn't find verified steps for this in our knowledge base, so I don't want to"
+        " guess at the exact menus or settings. If you'd like, I can open a support ticket so a human"
+        " teammate can pick this up — just reply \"yes, create a ticket\" and I'll do it."
+    )
+
+
+def _model_error_reply(user_text: str | None, *, include_ticket_offer: bool = False) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        if include_ticket_offer:
+            return "मुझे अभी मॉडल तक पहुंचने में दिक्कत हो रही है। कृपया थोड़ी देर में फिर कोशिश करें, या चाहें तो एक सपोर्ट टिकट खोल दें।"
+        return "मुझे अभी मॉडल तक पहुंचने में दिक्कत हो रही है। कृपया थोड़ी देर में फिर कोशिश करें।"
+    if language == "bn":
+        if include_ticket_offer:
+            return "এই মুহূর্তে মডেলে পৌঁছাতে সমস্যা হচ্ছে। একটু পরে আবার চেষ্টা করুন, বা চাইলে একটি সাপোর্ট টিকিট খুলতে পারেন।"
+        return "এই মুহূর্তে মডেলে পৌঁছাতে সমস্যা হচ্ছে। একটু পরে আবার চেষ্টা করুন।"
+    if include_ticket_offer:
+        return "I'm having trouble reaching the model right now. Please try again, or open a support ticket."
+    return "I'm having trouble reaching the model right now. Please try again in a moment."
+
+
+def _generation_empty_reply(user_text: str | None) -> str:
+    language = _reply_language(user_text)
+    if language == "hi":
+        return "मैं इस समय जवाब तैयार नहीं कर सका।"
+    if language == "bn":
+        return "আমি এই মুহূর্তে একটি উত্তর তৈরি করতে পারিনি।"
+    return "I couldn't generate a response."
+# Normalized (lowercase, punctuation stripped, no apostrophes) phrases only — keeps
+# real questions like "Hello, I need VPN access" on the full retrieval path.
+_CASUAL_GREETING_PHRASES: frozenset[str] = frozenset(
+    {
+        "hi",
+        "hey",
+        "hello",
+        "yo",
+        "howdy",
+        "sup",
+        "hiya",
+        "greetings",
+        "morning",
+        "mornin",
+        "afternoon",
+        "evening",
+        "hi there",
+        "hey there",
+        "hello there",
+        "hi everyone",
+        "hey everyone",
+        "hello everyone",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "good day",
+        "how are you",
+        "howre you",
+        "how is it going",
+        "hows it going",
+        "whats up",
+        "what is up",
+        "how do you do",
+        "how are you doing",
+        "how have you been",
+    }
 )
 
 
@@ -255,6 +414,13 @@ _ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 # can't use library voices directly (free plan), add her to your VoiceLab and
 # override this with ELEVENLABS_VOICE_ID in .env.
 _ELEVENLABS_DEFAULT_VOICE_ID = "1qZOLVpd1TVic43MSkFY"
+# Premade voices that work on free-tier accounts; used only when the
+# configured/library voice is unavailable for the current ElevenLabs plan.
+_ELEVENLABS_SERVER_FALLBACK_VOICE_IDS = (
+    "hpp4J3VqNfWAUOO0d1Us",  # Bella
+    "cgSgspJ2msm6clMCkdW9",  # Jessica
+    "EXAVITQu4vr4xnSDxMaL",  # Sarah
+)
 # Multilingual v2 reproduces non-American accents (incl. Indian English) far
 # better than the turbo models, which is critical for natural pronunciation.
 _ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
@@ -361,6 +527,21 @@ async def chat_text_to_speech(
 
         async with _httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200 and resp.status_code in {401, 402, 403, 404}:
+                for fallback_voice_id in _ELEVENLABS_SERVER_FALLBACK_VOICE_IDS:
+                    if fallback_voice_id == voice_id:
+                        continue
+                    fallback_url = _ELEVENLABS_TTS_URL.format(voice_id=fallback_voice_id)
+                    fallback_resp = await client.post(fallback_url, headers=headers, json=payload)
+                    if fallback_resp.status_code == 200:
+                        log.warning(
+                            "Configured ElevenLabs voice %s unavailable (%s); using server-side fallback voice %s.",
+                            voice_id,
+                            resp.status_code,
+                            fallback_voice_id,
+                        )
+                        resp = fallback_resp
+                        break
     except Exception as exc:
         log.warning("TTS request failed (%s); falling back to browser SpeechSynthesis.", exc)
         return _browser_tts_fallback(spoken, reason="request_failed")
@@ -518,23 +699,31 @@ async def send_message(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     started = time.time()
-    user_msg = await _persist_user_message(
-        db, cid, body.content, image_data_url=body.imageDataUrl
+
+    # Parallel setup: persist the new message, update the conversation
+    # title, load the most recent assistant message (used by three intent
+    # short-circuits below) all in one round trip.
+    persist_user_task = asyncio.create_task(
+        _persist_user_message(db, cid, body.content, image_data_url=body.imageDataUrl)
     )
-    await _bump_conversation_title(db, c, body.content)
+    bump_title_task = asyncio.create_task(_bump_conversation_title(db, c, body.content))
+    last_assistant_task = _schedule_await(
+        db.messages.find_one(
+            {"conversationId": cid, "role": "assistant"},
+            sort=[("createdAt", -1)],
+        )
+    )
+
+    user_msg = await persist_user_task
+    last_assistant: dict[str, object] | None
+    last_assistant, _ = await asyncio.gather(last_assistant_task, bump_title_task)
+
     agent_state = chat_agent.normalize_state(c.get("agentState"))
-
-    planner_state = await _planner_state_with_unresolved_signal(
-        db, cid, agent_state, body.content
-    )
-    enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = await _enhance_query(
-        db,
-        cid,
-        body.content,
-        agent_state=planner_state,
+    planner_state = _planner_state_with_unresolved_signal_sync(
+        agent_state, body.content, last_assistant
     )
 
-    if await _should_create_ticket_from_consent(db, cid, body.content):
+    if _should_create_ticket_from_consent_sync(body.content, last_assistant):
         ticket = await _create_ticket_from_conversation(
             db,
             cid,
@@ -556,11 +745,11 @@ async def send_message(
         assistant_msg = await _persist_assistant_message(
             db,
             cid,
-            content=_ticket_created_reply(ticket),
+            content=_ticket_created_reply(ticket, body.content),
             citations=[],
             can_answer=False,
             started=started,
-            rewritten_query=enhanced_query,
+            rewritten_query=None,
             intent="ticket_created",
             kind="ticket_created",
             ticket_id=ticket["_id"],
@@ -572,7 +761,7 @@ async def send_message(
             "assistantMessage": serialize_message(assistant_msg),
         }
 
-    if await _should_acknowledge_resolution(db, cid, body.content):
+    if _should_acknowledge_resolution_sync(body.content, last_assistant):
         await _persist_agent_state(db, cid, _resolution_state(agent_state, body.content))
         assistant_msg = await _persist_resolution_acknowledgement(
             db, cid, started, user_id=user.userId, user_text=body.content
@@ -612,6 +801,29 @@ async def send_message(
             "assistantMessage": serialize_message(assistant_msg),
         }
 
+    if _is_casual_greeting_only(body.content) and not (body.imageDataUrl or "").strip():
+        assistant_msg = await _persist_assistant_message(
+            db,
+            cid,
+            content=_casual_greeting_reply(body.content),
+            citations=[],
+            can_answer=True,
+            started=started,
+            rewritten_query=None,
+            intent="casual_greeting",
+            kind="casual_greeting",
+            user_id=user.userId,
+            user_text=body.content,
+        )
+        return {
+            "userMessage": serialize_message(user_msg),
+            "assistantMessage": serialize_message(assistant_msg),
+        }
+
+    # Run query rewrite + durable user memory search concurrently with the
+    # retrieval that depends on the rewrite. ``_prepare_agent_turn`` keeps
+    # the planner LLM call after retrieval (it needs the citations), but
+    # internally also parallelises the rewrite + memory search.
     prepared = await _prepare_agent_turn(
         db,
         cid,
@@ -620,7 +832,6 @@ async def send_message(
         tenant_id=tenant_for(user),
         agent_state=agent_state,
         planner_state=planner_state,
-        pre_enhanced=(enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries),
     )
 
     decision = prepared["decision"]
@@ -692,7 +903,7 @@ async def send_message(
         assistant_msg = await _persist_assistant_message(
             db,
             cid,
-            content=_ticket_created_reply(ticket),
+            content=_ticket_created_reply(ticket, body.content),
             citations=[],
             can_answer=False,
             started=started,
@@ -717,24 +928,27 @@ async def send_message(
         prepared["memory_snippets"],
         agent_state=answer_state,
         rewritten_query=retrieval.rewritten_query,
+        recent_messages=prepared["recent_messages"],
     )
 
-    answer, can_answer, used_idx = await _generate_answer(turns)
+    answer, can_answer, used_idx = await _generate_answer(turns, user_text=body.content)
     filtered = _select_citations(retrieval.citations(), used_idx or decision.used_citations)
     can_answer = _resolve_can_answer(answer, can_answer)
 
-    answer, can_answer, replaced_by_verifier = await _enforce_grounded_answer(
+    answer, can_answer, replaced_by_verifier = await _enforce_grounded_answer_safe(
         answer=answer,
         citations=filtered,
         can_answer=can_answer,
         rewritten_query=retrieval.rewritten_query,
+        check_topic=(required_stage == "Stage 4"),
+        user_text=body.content,
     )
 
     message_kind = "answer"
     response_intent = retrieval.intent
     if not can_answer:
         if not replaced_by_verifier:
-            answer = _append_ticket_offer(answer)
+            answer = _append_ticket_offer(answer, body.content)
         message_kind = "ticket_offer"
         response_intent = "investigation_ticket_offer"
 
@@ -791,37 +1005,43 @@ async def send_message_stream(
     async def events() -> AsyncIterator[bytes]:
         started = time.time()
 
+        # ------------------------------------------------------------------
+        # Phase 1 — Setup work (no LLM, all parallel).
+        #
+        # We can persist the user prompt, refresh the conversation metadata,
+        # load the last assistant message (for the three intent classifiers
+        # below), and read the recent message window all at the same time.
+        # ------------------------------------------------------------------
         yield _sse("process", {"name": "Saving user prompt", "status": "started"})
-        user_msg = await _persist_user_message(
-            db, cid, body.content, image_data_url=body.imageDataUrl
+        persist_user_task = asyncio.create_task(
+            _persist_user_message(db, cid, body.content, image_data_url=body.imageDataUrl)
         )
+        bump_title_task = asyncio.create_task(_bump_conversation_title(db, c, body.content))
+        last_assistant_task = _schedule_await(
+            db.messages.find_one(
+                {"conversationId": cid, "role": "assistant"},
+                sort=[("createdAt", -1)],
+            )
+        )
+        recent_messages_task = asyncio.create_task(_recent_messages(db, cid))
+
+        user_msg = await persist_user_task
         yield _sse("process", {"name": "Saving user prompt", "status": "completed"})
-
-        yield _sse("process", {"name": "Updating conversation metadata", "status": "started"})
-        await _bump_conversation_title(db, c, body.content)
-        yield _sse("process", {"name": "Updating conversation metadata", "status": "completed"})
-
         yield _sse("user", serialize_message(user_msg))
+        yield _sse("process", {"name": "Updating conversation metadata", "status": "started"})
+
+        last_assistant: dict[str, object] | None
+        last_assistant, _ = await asyncio.gather(last_assistant_task, bump_title_task)
+        yield _sse("process", {"name": "Updating conversation metadata", "status": "completed"})
 
         agent_state = chat_agent.normalize_state(c.get("agentState"))
 
-        yield _sse("process", {"name": "Reviewing investigation memory", "status": "started"})
-        planner_state = await _planner_state_with_unresolved_signal(
-            db, cid, agent_state, body.content
-        )
-        yield _sse("process", {"name": "Enhancing user query", "status": "started"})
-        enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = await _enhance_query(
-            db,
-            cid,
-            body.content,
-            agent_state=planner_state,
-        )
-        yield _sse("process", {"name": "Enhancing user query", "status": "completed"})
-        yield _sse("process", {"name": "Reviewing investigation memory", "status": "completed"})
-
-        yield _sse("process", {"name": "Checking ticket creation consent", "status": "started"})
-        if await _should_create_ticket_from_consent(db, cid, body.content):
-            yield _sse("process", {"name": "Checking ticket creation consent", "status": "completed"})
+        # ------------------------------------------------------------------
+        # Phase 2 — Deterministic short-circuits using the preloaded
+        # last_assistant doc. None of these need the LLM at all, so they
+        # produce a response in tens of milliseconds.
+        # ------------------------------------------------------------------
+        if _should_create_ticket_from_consent_sync(body.content, last_assistant):
             yield _sse("process", {"name": "Creating support ticket", "status": "started"})
             ticket = await _create_ticket_from_conversation(
                 db,
@@ -841,7 +1061,7 @@ async def send_message_stream(
                     "resolutionSummary": None,
                 },
             )
-            ticket_reply = _ticket_created_reply(ticket)
+            ticket_reply = _ticket_created_reply(ticket, body.content)
             yield _sse("citations", [])
             for chunk in ticket_reply.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
@@ -852,7 +1072,7 @@ async def send_message_stream(
                 citations=[],
                 can_answer=False,
                 started=started,
-                rewritten_query=enhanced_query,
+                rewritten_query=None,
                 intent="ticket_created",
                 kind="ticket_created",
                 ticket_id=ticket["_id"],
@@ -863,15 +1083,13 @@ async def send_message_stream(
             yield _sse("process", {"name": "Completed", "status": "completed"})
             yield _sse("done", serialize_message(assistant_msg))
             return
-        yield _sse("process", {"name": "Checking ticket creation consent", "status": "completed"})
 
-        yield _sse("process", {"name": "Checking resolution signal", "status": "started"})
-        if await _should_acknowledge_resolution(db, cid, body.content):
-            yield _sse("process", {"name": "Checking resolution signal", "status": "completed"})
+        if _should_acknowledge_resolution_sync(body.content, last_assistant):
             yield _sse("process", {"name": "Acknowledging resolution", "status": "started"})
             await _persist_agent_state(db, cid, _resolution_state(agent_state, body.content))
             yield _sse("citations", [])
-            for chunk in _RESOLUTION_ACKNOWLEDGEMENT.split(" "):
+            resolution_reply = _resolution_acknowledgement(body.content)
+            for chunk in resolution_reply.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
             assistant_msg = await _persist_resolution_acknowledgement(
                 db, cid, started, user_id=user.userId, user_text=body.content
@@ -880,15 +1098,12 @@ async def send_message_stream(
             yield _sse("process", {"name": "Completed", "status": "completed"})
             yield _sse("done", serialize_message(assistant_msg))
             return
-        yield _sse("process", {"name": "Checking resolution signal", "status": "completed"})
 
-        yield _sse("process", {"name": "Checking list-tickets intent", "status": "started"})
         if _detect_list_tickets_intent(body.content):
-            yield _sse("process", {"name": "Checking list-tickets intent", "status": "completed"})
             yield _sse("process", {"name": "Fetching your tickets", "status": "started"})
             status_filter = _extract_ticket_status_filter(body.content)
             tickets = await _fetch_user_tickets(db, user.userId, status=status_filter)
-            tickets_reply = _format_tickets_reply(tickets, status=status_filter)
+            tickets_reply = _format_tickets_reply(tickets, status=status_filter, user_text=body.content)
             yield _sse("citations", [])
             for chunk in tickets_reply.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
@@ -900,11 +1115,8 @@ async def send_message_stream(
             yield _sse("process", {"name": "Completed", "status": "completed"})
             yield _sse("done", serialize_message(assistant_msg))
             return
-        yield _sse("process", {"name": "Checking list-tickets intent", "status": "completed"})
 
-        yield _sse("process", {"name": "Checking ticket escalation intent", "status": "started"})
         if _detect_ticket_intent(body.content):
-            yield _sse("process", {"name": "Checking ticket escalation intent", "status": "completed"})
             yield _sse("process", {"name": "Preparing escalation guidance", "status": "started"})
             await _persist_agent_state(
                 db,
@@ -916,7 +1128,8 @@ async def send_message_stream(
                 },
             )
             yield _sse("citations", [])
-            for chunk in _TICKET_INTENT_RESPONSE.split(" "):
+            ticket_intent_reply = _ticket_intent_response(body.content)
+            for chunk in ticket_intent_reply.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
             assistant_msg = await _persist_ticket_intent_reply(
                 db, cid, started, user_id=user.userId, user_text=body.content
@@ -925,7 +1138,58 @@ async def send_message_stream(
             yield _sse("process", {"name": "Completed", "status": "completed"})
             yield _sse("done", serialize_message(assistant_msg))
             return
-        yield _sse("process", {"name": "Checking ticket escalation intent", "status": "completed"})
+
+        if _is_casual_greeting_only(body.content) and not (body.imageDataUrl or "").strip():
+            yield _sse("process", {"name": "Replying", "status": "started"})
+            yield _sse("citations", [])
+            greeting_reply = _casual_greeting_reply(body.content)
+            for chunk in greeting_reply.split(" "):
+                yield _sse("token", {"delta": chunk + " "})
+            assistant_msg = await _persist_assistant_message(
+                db,
+                cid,
+                content=greeting_reply,
+                citations=[],
+                can_answer=True,
+                started=started,
+                rewritten_query=None,
+                intent="casual_greeting",
+                kind="casual_greeting",
+                user_id=user.userId,
+                user_text=body.content,
+            )
+            yield _sse("process", {"name": "Replying", "status": "completed"})
+            yield _sse("process", {"name": "Completed", "status": "completed"})
+            yield _sse("done", serialize_message(assistant_msg))
+            return
+
+        # ------------------------------------------------------------------
+        # Phase 3 — Pre-LLM grounding context.
+        #
+        # query rewrite + durable user memory search + recent messages are
+        # mutually independent. We dispatch them concurrently to collapse
+        # ~3 LLM/embedding round trips into ~1 wall-clock round trip.
+        # ------------------------------------------------------------------
+        planner_state = _planner_state_with_unresolved_signal_sync(
+            agent_state, body.content, last_assistant
+        )
+
+        yield _sse("process", {"name": "Enhancing user query", "status": "started"})
+        yield _sse("process", {"name": "Loading user memory", "status": "started"})
+        enhance_task = asyncio.create_task(
+            _enhance_query(db, cid, body.content, agent_state=planner_state)
+        )
+        memory_task = asyncio.create_task(
+            agent_memory.search_user_memory(user.userId, body.content)
+        )
+
+        (
+            (enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries),
+            memory_snippets,
+            recent_messages,
+        ) = await asyncio.gather(enhance_task, memory_task, recent_messages_task)
+        yield _sse("process", {"name": "Enhancing user query", "status": "completed"})
+        yield _sse("process", {"name": "Loading user memory", "status": "completed"})
 
         yield _sse("process", {"name": "Retrieving relevant knowledge", "status": "started"})
         retrieval = await _cached_retrieve(
@@ -939,12 +1203,10 @@ async def send_message_stream(
         )
         yield _sse("process", {"name": "Retrieving relevant knowledge", "status": "completed"})
 
-        yield _sse("process", {"name": "Loading user memory", "status": "started"})
-        memory_snippets = await agent_memory.search_user_memory(user.userId, body.content)
-        yield _sse("process", {"name": "Loading user memory", "status": "completed"})
-
+        # ------------------------------------------------------------------
+        # Phase 4 — Planner LLM call (now without reasoning) and citations.
+        # ------------------------------------------------------------------
         yield _sse("process", {"name": "Planning next best action", "status": "started"})
-        recent_messages = await _recent_messages(db, cid)
         decision = await chat_agent.decide_next_action(
             recent_messages=recent_messages,
             current_user_message=body.content,
@@ -955,15 +1217,14 @@ async def send_message_stream(
         )
         yield _sse("process", {"name": "Planning next best action", "status": "completed"})
 
-        # Same chunk list as retrieval.context_block() / planner input — show all in UI, not usedCitations-only.
+        # Same chunk list as retrieval.context_block() / planner input — show
+        # all in UI, not usedCitations-only.
         context_citations = retrieval.citations()
         yield _sse("citations", context_citations)
 
-        yield _sse("process", {"name": "Updating investigation memory", "status": "started"})
         if decision.action != "answer":
             next_state = chat_agent.apply_decision_to_state(agent_state, decision)
             await _persist_agent_state(db, cid, next_state)
-        yield _sse("process", {"name": "Updating investigation memory", "status": "completed"})
 
         if decision.action == "ask_clarifying_question":
             yield _sse("process", {"name": "Asking a clarifying question", "status": "started"})
@@ -1029,7 +1290,7 @@ async def send_message_stream(
                     "resolutionSummary": None,
                 },
             )
-            ticket_reply = _ticket_created_reply(ticket)
+            ticket_reply = _ticket_created_reply(ticket, body.content)
             for chunk in ticket_reply.split(" "):
                 yield _sse("token", {"delta": chunk + " "})
             assistant_msg = await _persist_assistant_message(
@@ -1051,9 +1312,17 @@ async def send_message_stream(
             yield _sse("done", serialize_message(assistant_msg))
             return
 
+        # ------------------------------------------------------------------
+        # Phase 5 — Main grounded answer.
+        #
+        # We stream the LLM deltas directly to the client via an incremental
+        # JSON extractor so the user sees prose forming in real time instead
+        # of waiting for the verifier to finish. The full raw output is also
+        # accumulated so we can still pull canAnswer / usedCitations out of
+        # the JSON envelope.
+        # ------------------------------------------------------------------
         answer_state = chat_agent.apply_decision_to_state(agent_state, decision)
 
-        yield _sse("process", {"name": "Composing grounded answer", "status": "started"})
         _, turns, required_stage = await _build_chat_payload(
             db,
             cid,
@@ -1062,38 +1331,68 @@ async def send_message_stream(
             memory_snippets,
             agent_state=answer_state,
             rewritten_query=retrieval.rewritten_query,
+            recent_messages=recent_messages,
         )
-        yield _sse("process", {"name": "Composing grounded answer", "status": "completed"})
 
         accum: list[str] = []
+        streamer = _JsonAnswerStreamer()
         llm_failed = False
+        emitted_any = False
         yield _sse("process", {"name": "Generating grounded answer", "status": "started"})
         try:
-            async for delta in llm.chat_stream(turns, reasoning=True):
+            async for delta in llm.chat_stream(turns, reasoning=_answer_uses_reasoning()):
                 accum.append(delta)
+                cleaned = streamer.feed(delta)
+                if cleaned:
+                    emitted_any = True
+                    yield _sse("token", {"delta": cleaned})
         except Exception as err:
             log.exception("stream LLM failed: %s", err)
-            accum = ["I'm having trouble reaching the model right now. Please try again, or open a support ticket."]
             llm_failed = True
+            fallback = _model_error_reply(body.content, include_ticket_offer=True)
+            fallback_json = json.dumps(
+                {"answer": fallback, "canAnswer": False, "usedCitations": []},
+                ensure_ascii=False,
+            )
+            accum = [fallback_json]
             yield _sse("process", {"name": "Generating grounded answer", "status": "error"})
+            yield _sse("replace", {"content": fallback})
         else:
             yield _sse("process", {"name": "Generating grounded answer", "status": "completed"})
 
         full = "".join(accum).strip()
         answer, can_answer, used_idx = _try_parse_structured(full)
         if not answer:
-            answer = full or "I couldn't generate a response."
+            answer = full or _generation_empty_reply(body.content)
             can_answer = can_answer if can_answer is not None else True
+            # Model didn't produce JSON; surface the raw text to the client.
+            tail = streamer.finalize(full)
+            if tail and not emitted_any:
+                yield _sse("replace", {"content": answer})
+            elif tail:
+                yield _sse("token", {"delta": tail})
         can_answer = _resolve_can_answer(answer, can_answer, force_false=llm_failed)
 
         filtered = _select_citations(retrieval.citations(), used_idx or decision.used_citations)
 
+        # ------------------------------------------------------------------
+        # Phase 6 — Grounding / on-topic verification.
+        #
+        # The streamed answer is already on screen. The verifier runs with a
+        # 6-second budget and fails open on timeout. On-topic is only checked
+        # for Stage 4 (final verdict) replies where drift to a different
+        # product actually matters; Stage 1/2/3 replies are short diagnostic
+        # turns where on-topic risk is negligible and the extra LLM call is
+        # not worth the latency.
+        # ------------------------------------------------------------------
         yield _sse("process", {"name": "Verifying grounding", "status": "started"})
-        answer, can_answer, replaced_by_verifier = await _enforce_grounded_answer(
+        verified_answer, can_answer, replaced_by_verifier = await _enforce_grounded_answer_safe(
             answer=answer,
             citations=filtered,
             can_answer=can_answer,
             rewritten_query=retrieval.rewritten_query,
+            check_topic=(required_stage == "Stage 4"),
+            user_text=body.content,
         )
         yield _sse("process", {"name": "Verifying grounding", "status": "completed"})
 
@@ -1102,14 +1401,23 @@ async def send_message_stream(
         if replaced_by_verifier:
             message_kind = "ticket_offer"
             response_intent = "investigation_ticket_offer"
+            answer = verified_answer
+            # Tell the UI to swap the streamed bubble content with the
+            # verifier-approved replacement.
+            yield _sse("replace", {"content": answer})
         elif not can_answer:
-            answer = _append_ticket_offer(answer)
+            updated = _append_ticket_offer(verified_answer, body.content)
+            if updated != verified_answer:
+                # We only need to send the appended tail, not the whole
+                # message, because the streamed prose is already shown.
+                tail = updated[len(verified_answer):]
+                if tail:
+                    yield _sse("token", {"delta": tail})
+            answer = updated
             message_kind = "ticket_offer"
             response_intent = "investigation_ticket_offer"
-
-        for chunk in answer.split(" "):
-            if chunk:
-                yield _sse("token", {"delta": chunk + " "})
+        else:
+            answer = verified_answer
 
         yield _sse("process", {"name": "Saving assistant response", "status": "started"})
         final_state = chat_agent.apply_decision_to_state(
@@ -1151,11 +1459,180 @@ def _sse(event: str, data: object) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
 
 
+def _fire_and_forget(coro) -> None:
+    """Run ``coro`` as a background task and swallow exceptions.
+
+    Used for non-critical post-response work (durable memory writes,
+    audit-style updates) that must NEVER block the SSE ``done`` event.
+    Exceptions are logged so silent failures still surface in monitoring.
+    """
+    async def _runner() -> None:
+        try:
+            await coro
+        except Exception as err:  # noqa: BLE001 — log and swallow
+            log.warning("background task failed: %s", err)
+
+    try:
+        asyncio.create_task(_runner())
+    except RuntimeError:
+        # No running loop (extremely rare in our flow); drop the coroutine.
+        coro.close()
+
+
+class _JsonAnswerStreamer:
+    """Incrementally extract the value of the top-level ``"answer"`` string
+    field from a streamed JSON LLM response.
+
+    Used so we can yield SSE ``token`` events to the client as the model is
+    still generating, while preserving the JSON envelope (``canAnswer``,
+    ``usedCitations``) needed by the grounded answer pipeline.
+
+    Behaviour:
+    - Feeds raw model deltas in via :meth:`feed` and returns the cleaned
+      prose chunk that should be emitted to the client right now.
+    - Properly handles JSON escapes (``\\n``, ``\\t``, ``\\"``, ``\\\\``,
+      ``\\uXXXX``) including escapes that straddle SSE chunks.
+    - Stops emitting once the closing quote of the answer string is seen.
+    - Falls back gracefully when the model does not actually emit a JSON
+      object with an ``answer`` key (treats the raw text as the answer so
+      the user still sees something).
+    """
+
+    __slots__ = ("_raw", "_cursor", "_opened", "_closed", "_fallback_emitted")
+
+    def __init__(self) -> None:
+        self._raw = ""
+        self._cursor = 0
+        self._opened = False
+        self._closed = False
+        self._fallback_emitted = 0
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def feed(self, delta: str) -> str:
+        if self._closed or not delta:
+            return ""
+        self._raw += delta
+
+        if not self._opened:
+            idx = self._find_answer_value_start()
+            if idx is None:
+                # Don't accumulate an unbounded prefix while we wait for the
+                # ``"answer":"`` opening. Keep a small tail so a key split
+                # across chunk boundaries is still detectable.
+                if len(self._raw) > 1024:
+                    self._raw = self._raw[-256:]
+                return ""
+            self._opened = True
+            self._cursor = idx + 1  # absolute index just past the opening quote
+
+        return self._emit_pending()
+
+    def finalize(self, raw_full: str) -> str:
+        """Emit any text the streamer missed because the model didn't follow
+        the JSON shape. Returns text that has NOT been previously emitted.
+        """
+        if self._opened:
+            return ""
+        # No ``"answer"`` field was ever found in the raw output. Surface the
+        # remaining text so the user still sees something.
+        stripped = (raw_full or "").strip()
+        if not stripped or self._fallback_emitted >= len(stripped):
+            return ""
+        tail = stripped[self._fallback_emitted :]
+        self._fallback_emitted = len(stripped)
+        self._closed = True
+        return tail
+
+    def _find_answer_value_start(self) -> int | None:
+        key_pos = self._raw.find('"answer"')
+        if key_pos < 0:
+            return None
+        colon_pos = self._raw.find(":", key_pos + len('"answer"'))
+        if colon_pos < 0:
+            return None
+        i = colon_pos + 1
+        while i < len(self._raw) and self._raw[i] in " \t\n\r":
+            i += 1
+        if i >= len(self._raw):
+            return None
+        if self._raw[i] != '"':
+            # Value is null / false / number — there's no string to stream.
+            self._closed = True
+            return None
+        return i
+
+    def _emit_pending(self) -> str:
+        out: list[str] = []
+        i = self._cursor
+        raw = self._raw
+        n = len(raw)
+        while i < n:
+            ch = raw[i]
+            if ch == '"':
+                self._closed = True
+                break
+            if ch == "\\":
+                if i + 1 >= n:
+                    break  # Wait for more input to complete the escape.
+                nxt = raw[i + 1]
+                if nxt == "u":
+                    if i + 6 > n:
+                        break  # Wait for the 4 hex digits.
+                    try:
+                        out.append(chr(int(raw[i + 2 : i + 6], 16)))
+                    except ValueError:
+                        out.append("?")
+                    i += 6
+                    continue
+                if nxt == "n":
+                    out.append("\n")
+                elif nxt == "t":
+                    out.append("\t")
+                elif nxt == "r":
+                    out.append("\r")
+                elif nxt in ('"', "\\", "/"):
+                    out.append(nxt)
+                else:
+                    out.append(nxt)
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        self._cursor = i
+        return "".join(out)
+
+
 def _detect_ticket_intent(content: str) -> bool:
     text = (content or "").strip()
     if not text:
         return False
     return any(p.search(text) for p in _TICKET_INTENT_PATTERNS)
+
+
+def _is_casual_greeting_only(content: str) -> bool:
+    """True for short openers (hi, hello, how are you) with no real request.
+
+    Skips query rewrite, memory search, and RAG retrieval — answers with a brief acknowledgement.
+    """
+    raw = (content or "").strip()
+    if not raw or len(raw) > _CASUAL_GREETING_MAX_LEN:
+        return False
+    if any(ch.isdigit() for ch in raw):
+        return False
+    low = raw.lower()
+    low = low.replace("\u2018", "'").replace("\u2019", "'")
+    low = re.sub(r"[^\w\s']+", " ", low)
+    low = re.sub(r"'", "", low)
+    low = re.sub(r"\s+", " ", low).strip()
+    if not low:
+        return False
+    words = low.split()
+    if not words or len(words) > _CASUAL_GREETING_MAX_WORDS:
+        return False
+    return low in _CASUAL_GREETING_PHRASES
 
 
 def _detect_list_tickets_intent(content: str) -> bool:
@@ -1199,33 +1676,62 @@ def _format_tickets_reply(
     tickets: list[dict[str, object]],
     *,
     status: str | None = None,
+    user_text: str | None = None,
 ) -> str:
+    language = _reply_language(user_text)
     status_label = status.replace("_", " ") if status else None
     if not tickets:
         if status_label:
+            if language == "hi":
+                return f"आपके पास अभी {status_label} सपोर्ट टिकट नहीं हैं। अगर आप चाहें, तो मैं किसी दूसरे स्टेटस के टिकट भी दिखा सकता हूं।"
+            if language == "bn":
+                return f"আপনার এখন {status_label} সাপোর্ট টিকিট নেই। চাইলে অন্য স্ট্যাটাসের টিকিটও দেখাতে পারি।"
             return (
                 f"You don't have any {status_label} support tickets right now. "
                 "Let me know if you'd like to see tickets in another status."
             )
-        return _LIST_TICKETS_EMPTY_REPLY
+        return _list_tickets_empty_reply(user_text)
     header = (
-        f"Here are your {status_label} support tickets ({len(tickets)} total):"
+        f"यह रहे आपके {status_label} सपोर्ट टिकट ({len(tickets)} कुल):"
+        if language == "hi" and status_label
+        else f"এখানে আপনার {status_label} সাপোর্ট টিকিট ({len(tickets)}টি মোট):"
+        if language == "bn" and status_label
+        else f"Here are your {status_label} support tickets ({len(tickets)} total):"
         if status_label
+        else f"यह रहे आपके सपोर्ट टिकट ({len(tickets)} कुल):"
+        if language == "hi"
+        else f"এখানে আপনার সাপোর্ট টিকিট ({len(tickets)}টি মোট):"
+        if language == "bn"
         else f"Here are your support tickets ({len(tickets)} total):"
     )
     lines: list[str] = [header, ""]
     for t in tickets:
         ticket_id = t.get("id")
-        subject = str(t.get("subject") or "Untitled").strip() or "Untitled"
+        untitled = "Untitled"
+        if language == "hi":
+            untitled = "शीर्षक नहीं"
+        elif language == "bn":
+            untitled = "শিরোনাম নেই"
+        subject = str(t.get("subject") or untitled).strip() or untitled
         status = str(t.get("status") or "open").strip() or "open"
         priority = str(t.get("priority") or "").strip()
         meta = status if not priority else f"{status} · {priority} priority"
         lines.append(f"- **#{ticket_id} — {subject}** — {meta}")
         last_update = str(t.get("lastUpdate") or "").strip()
         if last_update:
-            lines.append(f"  Last update: {last_update}")
+            if language == "hi":
+                lines.append(f"  आखिरी अपडेट: {last_update}")
+            elif language == "bn":
+                lines.append(f"  সর্বশেষ আপডেট: {last_update}")
+            else:
+                lines.append(f"  Last update: {last_update}")
     lines.append("")
-    lines.append("Let me know if you'd like to dig into any of these.")
+    if language == "hi":
+        lines.append("अगर आप चाहें, तो इनमें से किसी भी टिकट को विस्तार से देख सकते हैं।")
+    elif language == "bn":
+        lines.append("চাইলে এগুলোর যেকোনো একটিতে আরও গভীরে যেতে পারি।")
+    else:
+        lines.append("Let me know if you'd like to dig into any of these.")
     return "\n".join(lines)
 
 
@@ -1242,7 +1748,7 @@ async def _persist_tickets_list_reply(
     return await _persist_assistant_message(
         db,
         cid,
-        content=_format_tickets_reply(tickets, status=status),
+        content=_format_tickets_reply(tickets, status=status, user_text=user_text),
         citations=[],
         can_answer=True,
         started=started,
@@ -1270,6 +1776,16 @@ def _detect_resolved_signal(content: str) -> bool:
     return any(p.search(text) for p in _RESOLVED_SIGNAL_PATTERNS)
 
 
+def _should_acknowledge_resolution_sync(
+    user_text: str, last_assistant: dict[str, object] | None
+) -> bool:
+    if not _detect_resolved_signal(user_text):
+        return False
+    if not last_assistant:
+        return False
+    return str(last_assistant.get("kind") or "").strip() in _RESOLUTION_PRIOR_KINDS
+
+
 async def _should_acknowledge_resolution(db, cid: int, user_text: str) -> bool:
     if not _detect_resolved_signal(user_text):
         return False
@@ -1277,9 +1793,7 @@ async def _should_acknowledge_resolution(db, cid: int, user_text: str) -> bool:
         {"conversationId": cid, "role": "assistant"},
         sort=[("createdAt", -1)],
     )
-    if not last_assistant:
-        return False
-    return str(last_assistant.get("kind") or "").strip() in _RESOLUTION_PRIOR_KINDS
+    return _should_acknowledge_resolution_sync(user_text, last_assistant)
 
 
 def _resolution_state(agent_state: dict[str, object], user_text: str) -> dict[str, object]:
@@ -1303,7 +1817,7 @@ async def _persist_resolution_acknowledgement(
     return await _persist_assistant_message(
         db,
         cid,
-        content=_RESOLUTION_ACKNOWLEDGEMENT,
+        content=_resolution_acknowledgement(user_text),
         citations=[],
         can_answer=True,
         started=started,
@@ -1315,24 +1829,43 @@ async def _persist_resolution_acknowledgement(
     )
 
 
-async def _planner_state_with_unresolved_signal(
-    db,
-    cid: int,
+_NOT_LOADED = object()  # Sentinel: caller did not pre-load ``last_assistant``.
+
+
+def _planner_state_with_unresolved_signal_sync(
     agent_state: dict[str, object],
     user_text: str,
+    last_assistant: dict[str, object] | None,
 ) -> dict[str, object]:
+    """Pure-Python version that operates on a preloaded last-assistant doc."""
     if not _detect_unresolved_signal(user_text):
         return agent_state
-    last_assistant = await db.messages.find_one(
-        {"conversationId": cid, "role": "assistant"},
-        sort=[("createdAt", -1)],
-    )
     if not last_assistant:
         return agent_state
     if str(last_assistant.get("kind") or "").strip() != "answer":
         return agent_state
     signal = _clip_line(user_text, limit=160) or "user reported the previous fix did not work"
     return {**agent_state, "lastUnresolvedSignal": signal}
+
+
+async def _planner_state_with_unresolved_signal(
+    db,
+    cid: int,
+    agent_state: dict[str, object],
+    user_text: str,
+    *,
+    last_assistant: object = _NOT_LOADED,
+) -> dict[str, object]:
+    if not _detect_unresolved_signal(user_text):
+        return agent_state
+    if last_assistant is _NOT_LOADED:
+        last_assistant = await db.messages.find_one(
+            {"conversationId": cid, "role": "assistant"},
+            sort=[("createdAt", -1)],
+        )
+    return _planner_state_with_unresolved_signal_sync(
+        agent_state, user_text, last_assistant  # type: ignore[arg-type]
+    )
 
 
 async def _persist_ticket_intent_reply(
@@ -1346,7 +1879,7 @@ async def _persist_ticket_intent_reply(
     return await _persist_assistant_message(
         db,
         cid,
-        content=_TICKET_INTENT_RESPONSE,
+        content=_ticket_intent_response(user_text),
         citations=[],
         can_answer=False,
         started=started,
@@ -1367,13 +1900,11 @@ def _has_ticket_consent(text: str) -> bool:
     return any(pattern.search(cleaned) for pattern in _TICKET_CONSENT_PATTERNS)
 
 
-async def _should_create_ticket_from_consent(db, cid: int, user_text: str) -> bool:
+def _should_create_ticket_from_consent_sync(
+    user_text: str, last_assistant: dict[str, object] | None
+) -> bool:
     if not _has_ticket_consent(user_text):
         return False
-    last_assistant = await db.messages.find_one(
-        {"conversationId": cid, "role": "assistant"},
-        sort=[("createdAt", -1)],
-    )
     if not last_assistant:
         return False
     kind = str(last_assistant.get("kind") or "").strip()
@@ -1382,6 +1913,16 @@ async def _should_create_ticket_from_consent(db, cid: int, user_text: str) -> bo
     if kind == "answer" and last_assistant.get("finalVerdict") is True:
         return True
     return False
+
+
+async def _should_create_ticket_from_consent(db, cid: int, user_text: str) -> bool:
+    if not _has_ticket_consent(user_text):
+        return False
+    last_assistant = await db.messages.find_one(
+        {"conversationId": cid, "role": "assistant"},
+        sort=[("createdAt", -1)],
+    )
+    return _should_create_ticket_from_consent_sync(user_text, last_assistant)
 
 
 def _normalize_string_items(raw: object, *, limit: int) -> list[str]:
@@ -1426,19 +1967,14 @@ def _ticket_priority(*, issue_text: str) -> str:
     return "medium"
 
 
-_UNGROUNDED_FALLBACK = (
-    "Sorry — I couldn't find verified steps for this in our knowledge base, so I don't want to"
-    " guess at the exact menus or settings. If you'd like, I can open a support ticket so a human"
-    " teammate can pick this up — just reply \"yes, create a ticket\" and I'll do it."
-)
-
-
 async def _enforce_grounded_answer(
     *,
     answer: str,
     citations: list[dict[str, object]],
     can_answer: bool,
     rewritten_query: str | None = None,
+    check_topic: bool = True,
+    user_text: str | None = None,
 ) -> tuple[str, bool, bool]:
     """Verify every action / UI claim is supported by the citations and that
     the answer stays on the topic of the consolidated user query.
@@ -1448,97 +1984,179 @@ async def _enforce_grounded_answer(
     replaced with a ticket-offer fallback and ``can_answer`` is forced to
     False. ``replaced`` indicates whether the answer was rewritten so callers
     can adjust streamed output / message kind.
+
+    The grounding and on-topic verifiers are dispatched concurrently to
+    halve verifier wall-time. The whole flow is wrapped in a global timeout
+    by the caller — when invoked from the streaming endpoint, the streamed
+    answer is already visible to the user so timing out and accepting the
+    streamed text is a safe fail-open.
+
+    ``check_topic`` lets callers skip the on-topic verifier when it adds no
+    safety value — short Stage 1/2/3 diagnostic turns rarely drift to a
+    different product, and Stage 4 is where drift actually matters.
     """
     if not can_answer:
         return answer, can_answer, False
     if not (answer or "").strip():
         return answer, can_answer, False
-    if not chat_agent.has_action_claims(answer) and citations:
-        # No action verbs and we have citations — verifier still useful for cause claims
-        pass
-    grounded, unsupported = await chat_agent.verify_answer_grounding(
-        answer=answer,
-        citations=citations,
+
+    has_topic_check = bool(check_topic and (rewritten_query or "").strip())
+
+    # Run the two verifiers in parallel — both are read-only on the answer,
+    # and the on-topic verdict on the original answer is still valid even
+    # if grounding later rewrites it (we re-verify in that branch).
+    grounding_task = asyncio.create_task(
+        chat_agent.verify_answer_grounding(answer=answer, citations=citations)
     )
+    topic_task: asyncio.Task[tuple[bool, list[str]]] | None = None
+    if has_topic_check:
+        topic_task = asyncio.create_task(
+            chat_agent.verify_answer_on_topic(
+                user_query=rewritten_query or "",
+                answer=answer,
+                citations=citations,
+            )
+        )
+
+    grounded, unsupported = await grounding_task
+
     if not grounded:
         log.info(
             "answer rejected by grounding verifier; unsupported=%s",
             unsupported,
         )
+        if topic_task is not None:
+            topic_task.cancel()
         rewritten = await chat_agent.rewrite_to_ground(
             answer=answer,
             citations=citations,
             unsupported=unsupported,
         )
-        if rewritten:
-            regrounded, still_unsupported = await chat_agent.verify_answer_grounding(
-                answer=rewritten,
-                citations=citations,
-            )
-            if regrounded:
-                log.info("answer rewritten to remove unsupported phrases and re-verified")
-                answer = rewritten
-            else:
-                log.info(
-                    "rewrite still rejected by grounding verifier; unsupported=%s",
-                    still_unsupported,
-                )
-                return _UNGROUNDED_FALLBACK, False, True
-        else:
-            return _UNGROUNDED_FALLBACK, False, True
-
-    if rewritten_query and (rewritten_query or "").strip():
-        on_topic, off_topic = await chat_agent.verify_answer_on_topic(
-            user_query=rewritten_query,
-            answer=answer,
+        if not rewritten:
+            return _ungrounded_fallback(user_text), False, True
+        regrounded, still_unsupported = await chat_agent.verify_answer_grounding(
+            answer=rewritten,
             citations=citations,
         )
-        if not on_topic:
+        if not regrounded:
             log.info(
-                "answer rejected by on-topic verifier; offTopic=%s",
-                off_topic,
+                "rewrite still rejected by grounding verifier; unsupported=%s",
+                still_unsupported,
             )
-            retopic = await chat_agent.rewrite_to_topic(
-                user_query=rewritten_query,
-                answer=answer,
-                citations=citations,
-                off_topic=off_topic,
-            )
-            if retopic:
-                still_on_topic, still_off_topic = await chat_agent.verify_answer_on_topic(
-                    user_query=rewritten_query,
-                    answer=retopic,
+            return _ungrounded_fallback(user_text), False, True
+        log.info("answer rewritten to remove unsupported phrases and re-verified")
+        answer = rewritten
+        # The original on-topic check was on the now-rewritten answer's
+        # predecessor — re-run it if topic checking is requested.
+        if has_topic_check:
+            topic_task = asyncio.create_task(
+                chat_agent.verify_answer_on_topic(
+                    user_query=rewritten_query or "",
+                    answer=answer,
                     citations=citations,
                 )
-                if still_on_topic:
-                    regrounded, _ = await chat_agent.verify_answer_grounding(
-                        answer=retopic,
-                        citations=citations,
-                    )
-                    if regrounded:
-                        log.info("answer rewritten to stay on topic and re-verified")
-                        return retopic, True, False
-                log.info(
-                    "topic rewrite still rejected; offTopic=%s",
-                    still_off_topic,
-                )
-            return _UNGROUNDED_FALLBACK, False, True
+            )
 
-    return answer, True, False
+    if topic_task is None:
+        return answer, True, False
+
+    try:
+        on_topic, off_topic = await topic_task
+    except asyncio.CancelledError:
+        on_topic, off_topic = True, []
+
+    if on_topic:
+        return answer, True, False
+
+    log.info("answer rejected by on-topic verifier; offTopic=%s", off_topic)
+    retopic = await chat_agent.rewrite_to_topic(
+        user_query=rewritten_query or "",
+        answer=answer,
+        citations=citations,
+        off_topic=off_topic,
+    )
+    if not retopic:
+        return _ungrounded_fallback(user_text), False, True
+
+    # Re-verify both grounding and on-topic on the topic-repaired answer in
+    # parallel so we don't pay two sequential LLM round-trips.
+    regrounded_task = asyncio.create_task(
+        chat_agent.verify_answer_grounding(answer=retopic, citations=citations)
+    )
+    retopic_task = asyncio.create_task(
+        chat_agent.verify_answer_on_topic(
+            user_query=rewritten_query or "",
+            answer=retopic,
+            citations=citations,
+        )
+    )
+    (regrounded, _), (still_on_topic, still_off_topic) = await asyncio.gather(
+        regrounded_task, retopic_task
+    )
+    if regrounded and still_on_topic:
+        log.info("answer rewritten to stay on topic and re-verified")
+        return retopic, True, False
+    log.info("topic rewrite still rejected; offTopic=%s", still_off_topic)
+    return _ungrounded_fallback(user_text), False, True
 
 
-def _append_ticket_offer(answer: str) -> str:
+async def _enforce_grounded_answer_safe(
+    *,
+    answer: str,
+    citations: list[dict[str, object]],
+    can_answer: bool,
+    rewritten_query: str | None,
+    check_topic: bool,
+    user_text: str | None = None,
+) -> tuple[str, bool, bool]:
+    """Wrap :func:`_enforce_grounded_answer` with a global wall-time budget.
+
+    On timeout we keep the streamed answer (fail-open) because the user has
+    already seen it and a hung verifier must never gate response delivery.
+    """
+    try:
+        return await asyncio.wait_for(
+            _enforce_grounded_answer(
+                answer=answer,
+                citations=citations,
+                can_answer=can_answer,
+                rewritten_query=rewritten_query,
+                check_topic=check_topic,
+                user_text=user_text,
+            ),
+            timeout=_VERIFIER_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "verifier exceeded %.1fs budget; accepting streamed answer",
+            _VERIFIER_TIMEOUT_S,
+        )
+        return answer, can_answer, False
+
+
+def _append_ticket_offer(answer: str, user_text: str | None = None) -> str:
     base = (answer or "").strip() or "I could not find a confident fix from the verified context yet."
     lowered = base.lower()
     if "yes, create a ticket" in lowered or "create a support ticket" in lowered:
         return base
-    return f"{base}\n\n{_TICKET_OFFER_APPENDIX}"
+    return f"{base}\n\n{_ticket_offer_appendix(user_text)}"
 
 
-def _ticket_created_reply(ticket: dict[str, object]) -> str:
+def _ticket_created_reply(ticket: dict[str, object], user_text: str | None = None) -> str:
     ticket_id = ticket.get("_id")
     subject = str(ticket.get("subject") or "your issue")
     status = str(ticket.get("status") or "open")
+    language = _reply_language(user_text)
+    if language == "hi":
+        return (
+            f"मैंने \"{subject}\" के लिए सपोर्ट टिकट #{ticket_id} बना दिया है। "
+            f"यह अभी {status} स्थिति में है। अब हमारी मानव टीम जांच के सार के साथ आगे फॉलो अप कर सकती है।"
+        )
+    if language == "bn":
+        return (
+            f"আমি \"{subject}\" এর জন্য সাপোর্ট টিকিট #{ticket_id} তৈরি করেছি। "
+            f"এটি এখন {status} অবস্থায় আছে। এখন মানব টিম তদন্তের সারাংশ নিয়ে ফলো আপ করতে পারবে।"
+        )
     return (
         f"I created support ticket #{ticket_id} for \"{subject}\". "
         f"It is currently {status}. A human teammate can now follow up with the investigation summary."
@@ -1738,7 +2356,9 @@ async def _persist_assistant_message(
         assistant_msg["finalVerdict"] = True
     await db.messages.insert_one(assistant_msg)
     if user_id and user_text and content:
-        await agent_memory.add_exchange_memory(user_id, user_text, content)
+        # Mem0 writes can take 1–3s; they must not gate the SSE ``done``
+        # event. Fire-and-forget so the user sees the response immediately.
+        _fire_and_forget(agent_memory.add_exchange_memory(user_id, user_text, content))
     return assistant_msg
 
 
@@ -1797,6 +2417,15 @@ async def _prepare_agent_turn(
     pre_enhanced: tuple[str, str, list[str], list[str]] | None = None,
 ) -> dict[str, object]:
     state_for_planner = planner_state or agent_state
+
+    # Fire the durable memory lookup and the recent-messages read alongside
+    # query enhancement. Query rewrite needs the planner state but not the
+    # other two — those have no dependency on the rewrite. We chain them so
+    # the wall-clock latency is roughly ``max(rewrite, memory, recent)``
+    # instead of the sum.
+    memory_task = asyncio.create_task(agent_memory.search_user_memory(user_id, content))
+    recent_task = asyncio.create_task(_recent_messages(db, cid))
+
     if pre_enhanced is not None:
         enhanced_query, enhanced_intent, enhanced_keywords, enhanced_subqueries = pre_enhanced
     else:
@@ -1806,6 +2435,7 @@ async def _prepare_agent_turn(
             content,
             agent_state=state_for_planner,
         )
+
     retrieval = await _cached_retrieve(
         db,
         content,
@@ -1815,8 +2445,8 @@ async def _prepare_agent_turn(
         keywords=enhanced_keywords,
         subqueries=enhanced_subqueries,
     )
-    memory_snippets = await agent_memory.search_user_memory(user_id, content)
-    recent_messages = await _recent_messages(db, cid)
+    memory_snippets, recent_messages = await asyncio.gather(memory_task, recent_task)
+
     decision = await chat_agent.decide_next_action(
         recent_messages=recent_messages,
         current_user_message=content,
@@ -1829,6 +2459,7 @@ async def _prepare_agent_turn(
         "decision": decision,
         "retrieval": retrieval,
         "memory_snippets": memory_snippets,
+        "recent_messages": recent_messages,
     }
 
 
@@ -1893,6 +2524,7 @@ async def _build_chat_payload(
     *,
     agent_state: dict[str, object] | None = None,
     rewritten_query: str | None = None,
+    recent_messages: list[dict[str, object]] | None = None,
 ):
     memory_block = ""
     if memory_snippets:
@@ -1910,13 +2542,25 @@ async def _build_chat_payload(
             f"{chat_agent.state_context_block(agent_state)}"
         )
 
-    recent = (
-        await db.messages.find({"conversationId": cid})
-        .sort("createdAt", 1)
-        .to_list(length=None)
-    )
-    recent_slice = recent[-6:]
+    # Stage detection only needs the last ~8 turns. Re-use the slice we already
+    # loaded for the planner when the caller supplies it to avoid a second DB round trip.
+    if recent_messages is not None:
+        recent_slice = recent_messages
+    else:
+        recent_desc = (
+            await db.messages.find(
+                {"conversationId": cid},
+                {"role": 1, "content": 1, "createdAt": 1},
+            )
+            .sort("createdAt", -1)
+            .to_list(length=8)
+        )
+        recent_slice = list(reversed(recent_desc))
     answer_query = (rewritten_query or "").strip() or current_user_content
+    latest_user_message_block = (
+        "\n\nLatest user message for language matching:\n"
+        f"{current_user_content.strip() or '(empty latest user message)'}\n"
+    )
     required_stage = _infer_required_troubleshooting_stage(recent_slice, current_user_content)
     is_final_verdict_stage = required_stage == "Stage 4"
     stage_requirement_block = ""
@@ -2054,6 +2698,9 @@ async def _build_chat_payload(
         " something worked or sharing good news. Do not sound cheerful about a failure or access issue.\n"
         "- If the situation involves loss, failure, denial, or inconvenience, a light note of sorrow or"
         " concern is appropriate, but keep it concise and professional.\n"
+        "- Match the user's latest language. If they write in English, reply in English; if they"
+        " switch to Hindi, Bengali, or another language, switch with them unless they explicitly ask"
+        " for a different language.\n"
         "- Speak in first person and address the user directly. Sound like a real support teammate, "
         "not a generic bot.\n\n"
         "Length and format (strict):\n"
@@ -2100,6 +2747,7 @@ async def _build_chat_payload(
         "- Do not mention support tickets or escalation unless the user explicitly asks for that.\n"
         "- Never invent facts, policies, UI elements, menu paths, settings names, or steps that are"
         " not supported by the context.\n\n"
+        f"{latest_user_message_block}"
         'Respond as JSON with this exact shape:\n'
         '{ "answer": string, "canAnswer": boolean, "usedCitations": number[] }\n\n'
         f"{memory_block}"
@@ -2112,16 +2760,19 @@ async def _build_chat_payload(
     return sys_prompt, turns, required_stage
 
 
-async def _generate_answer(turns: list[llm.ChatTurn]) -> tuple[str, bool | None, list[int]]:
+async def _generate_answer(
+    turns: list[llm.ChatTurn],
+    *,
+    user_text: str | None = None,
+) -> tuple[str, bool | None, list[int]]:
     try:
-        raw = await llm.chat(turns, json_mode=True, reasoning=True)
+        raw = await llm.chat(turns, json_mode=True, reasoning=_answer_uses_reasoning())
         metrics.LLM_CALLS.labels(provider="auto", kind="chat", outcome="ok").inc()
     except Exception as err:
         metrics.LLM_CALLS.labels(provider="auto", kind="chat", outcome="error").inc()
         log.exception("LLM call failed: %s", err)
         return (
-            "I'm having trouble reaching the model right now. "
-            "Please try again in a moment.",
+            _model_error_reply(user_text),
             False,
             [],
         )

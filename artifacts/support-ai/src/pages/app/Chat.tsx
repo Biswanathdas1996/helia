@@ -45,6 +45,7 @@ import {
   Volume2,
   Keyboard,
   Square,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -794,6 +795,23 @@ function presentationForProcessStep(step: ProcessStep): {
 
 type SseEvent = { event: string; data: string };
 
+function messageForTtsFallback(reason?: string): string {
+  switch (reason) {
+    case "payment_required":
+      return "Using the browser voice because the configured ElevenLabs voice is not available for this account. Add a supported VoiceLab voice or update the ElevenLabs plan to restore the natural voice.";
+    case "unauthorized":
+      return "Using the browser voice because ElevenLabs rejected the current API credentials or voice access.";
+    case "missing_api_key":
+      return "Using the browser voice because ElevenLabs is not configured on the server.";
+    case "request_failed":
+      return "Using the browser voice because ElevenLabs could not be reached right now.";
+    case "elevenlabs_error":
+      return "Using the browser voice because ElevenLabs rejected the current voice configuration.";
+    default:
+      return "Using the browser voice because the high-quality ElevenLabs voice is unavailable right now.";
+  }
+}
+
 async function* iterSseEvents(
   response: Response,
   signal?: AbortSignal,
@@ -1069,6 +1087,7 @@ export default function Chat() {
   const speechRecognitionRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioObjectUrlRef = useRef<string | null>(null);
+  const lastTtsFallbackReasonRef = useRef<string | null>(null);
   const chatModeRef = useRef<ChatMode>("text");
   const shouldAutoListenRef = useRef<boolean>(false);
   const speechSupported = useMemo(() => {
@@ -1403,6 +1422,23 @@ export default function Chat() {
     async (text: string) => {
       const clean = (text || "").trim();
       if (!clean) return;
+
+      const handleBrowserFallback = (
+        fallbackText: string,
+        reason?: string,
+      ) => {
+        const message = messageForTtsFallback(reason);
+        setVoiceError(message);
+        if (lastTtsFallbackReasonRef.current !== reason) {
+          toast({
+            title: "Using browser voice",
+            description: message,
+          });
+          lastTtsFallbackReasonRef.current = reason ?? "unknown";
+        }
+        speakWithBrowserTts(fallbackText);
+      };
+
       try {
         stopSpeaking();
         setIsSpeaking(true);
@@ -1416,7 +1452,7 @@ export default function Chat() {
         if (!res.ok) {
           // Server signalled a hard failure — fall back to the browser's
           // built-in speech synthesis so the user still hears the reply.
-          speakWithBrowserTts(clean);
+          handleBrowserFallback(clean, "request_failed");
           return;
         }
 
@@ -1424,21 +1460,26 @@ export default function Chat() {
         if (contentType.includes("application/json")) {
           // Backend told us to use the browser's SpeechSynthesis API
           // (e.g. ElevenLabs returned 402 on a free plan).
-          let payload: { useBrowserTts?: boolean; text?: string } = {};
+          let payload: {
+            useBrowserTts?: boolean;
+            text?: string;
+            reason?: string;
+          } = {};
           try {
             payload = await res.json();
           } catch {
             payload = {};
           }
           if (payload?.useBrowserTts) {
-            speakWithBrowserTts(payload.text || clean);
+            handleBrowserFallback(payload.text || clean, payload.reason);
             return;
           }
           // Unexpected JSON shape — still fall back so the user hears something.
-          speakWithBrowserTts(clean);
+          handleBrowserFallback(clean, "elevenlabs_error");
           return;
         }
 
+        lastTtsFallbackReasonRef.current = null;
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         audioObjectUrlRef.current = url;
@@ -1454,7 +1495,7 @@ export default function Chat() {
       } catch (err) {
         // Network or playback error — last-ditch fallback to browser TTS.
         try {
-          speakWithBrowserTts(clean);
+          handleBrowserFallback(clean, "request_failed");
         } catch {
           setIsSpeaking(false);
           setVoiceError(
@@ -1463,7 +1504,7 @@ export default function Chat() {
         }
       }
     },
-    [stopSpeaking, speakWithBrowserTts],
+    [stopSpeaking, speakWithBrowserTts, toast],
   );
 
   const startListening = useCallback(() => {
@@ -1671,6 +1712,22 @@ export default function Chat() {
               conversationId: convoId,
               role: "assistant",
               content: snapshot,
+              citations: prev?.citations ?? assistantCitations,
+              createdAt: prev?.createdAt ?? new Date().toISOString(),
+              canAnswer: null,
+              done: false,
+            }));
+          } else if (evt.event === "replace") {
+            // Verifier rejected the streamed answer and supplied a
+            // corrected one. Swap the bubble contents in place so the user
+            // sees the verified text instead of the rejected stream.
+            const next = (payload as { content?: string }).content ?? "";
+            assistantAccum = next;
+            setStreamingAssistantMessage((prev) => ({
+              id: prev?.id ?? -1,
+              conversationId: convoId,
+              role: "assistant",
+              content: next,
               citations: prev?.citations ?? assistantCitations,
               createdAt: prev?.createdAt ?? new Date().toISOString(),
               canAnswer: null,
@@ -2927,7 +2984,7 @@ export default function Chat() {
             )}
         </div>
 
-        <div className="border-t border-border/80 bg-background/95 px-3 py-2 md:px-8 md:py-2.5 backdrop-blur-sm">
+        <div className="relative border-t border-border/50 bg-background/80 px-3 py-3 shadow-[0_-10px_40px_-16px_var(--elevate-2)] backdrop-blur-xl supports-[backdrop-filter]:bg-background/70 md:px-8 md:py-4 dark:shadow-[0_-10px_40px_-16px_rgba(0,0,0,0.45)]">
           {chatEndedWithTicket && currentId && (
             <motion.div
               initial={{ opacity: 0, y: 4 }}
@@ -3031,7 +3088,7 @@ export default function Chat() {
               <div
                 role="tablist"
                 aria-label="Chat input mode"
-                className="mx-auto inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 p-1 text-xs shadow-sm backdrop-blur-sm"
+                className="mx-auto inline-flex items-center gap-0.5 rounded-full border border-border/60 bg-muted/25 p-0.5 text-xs shadow-inner ring-1 ring-black/[0.03] dark:ring-white/[0.06]"
               >
                 <button
                   type="button"
@@ -3039,13 +3096,13 @@ export default function Chat() {
                   aria-selected={chatMode === "text"}
                   onClick={() => setChatMode("text")}
                   className={cn(
-                    "inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-medium transition-colors",
+                    "inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11px] font-semibold tracking-wide transition-all duration-200",
                     chatMode === "text"
-                      ? "bg-background text-foreground shadow-sm ring-1 ring-border/80"
-                      : "text-muted-foreground hover:text-foreground",
+                      ? "bg-background text-foreground shadow-sm ring-1 ring-border/60"
+                      : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
                   )}
                 >
-                  <Keyboard className="h-3.5 w-3.5" />
+                  <Keyboard className="h-3.5 w-3.5 opacity-80" />
                   Text chat
                 </button>
                 <button
@@ -3060,13 +3117,13 @@ export default function Chat() {
                       : "Voice chat not supported in this browser"
                   }
                   className={cn(
-                    "inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                    "inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11px] font-semibold tracking-wide transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50",
                     chatMode === "voice"
-                      ? "bg-background text-foreground shadow-sm ring-1 ring-border/80"
-                      : "text-muted-foreground hover:text-foreground",
+                      ? "bg-background text-foreground shadow-sm ring-1 ring-border/60"
+                      : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
                   )}
                 >
-                  <Mic className="h-3.5 w-3.5" />
+                  <Mic className="h-3.5 w-3.5 opacity-80" />
                   Voice chat
                 </button>
               </div>
@@ -3155,9 +3212,18 @@ export default function Chat() {
               )}
             </div>
           )}
-          <p className="max-w-4xl mx-auto mt-1.5 text-center text-[10px] leading-tight text-muted-foreground/90">
-            Helia AI can make mistakes. Verify important information.
-          </p>
+          <div className="mx-auto mt-3 flex max-w-4xl justify-center md:mt-4">
+            <p className="inline-flex max-w-lg items-center gap-2 rounded-lg border border-border/50 bg-muted/20 px-3.5 py-2 text-[11px] leading-snug text-muted-foreground shadow-sm">
+              <ShieldCheck
+                className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70"
+                aria-hidden
+              />
+              <span>
+                Helia AI can make mistakes. Please verify important information
+                before acting on it.
+              </span>
+            </p>
+          </div>
         </div>
 
         <Dialog open={memoryGraphOpen} onOpenChange={setMemoryGraphOpen}>

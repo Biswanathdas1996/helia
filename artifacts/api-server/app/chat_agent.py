@@ -15,6 +15,20 @@ _MAX_CLARIFICATIONS = 3
 _TICKET_OFFER_THRESHOLD = 2
 
 
+def detect_reply_language(text: str | None) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "en"
+
+    bengali = sum(1 for ch in raw if "\u0980" <= ch <= "\u09ff")
+    devanagari = sum(1 for ch in raw if "\u0900" <= ch <= "\u097f")
+    if bengali > 0 and bengali >= devanagari:
+        return "bn"
+    if devanagari > 0:
+        return "hi"
+    return "en"
+
+
 @dataclass(slots=True)
 class AgentDecision:
     action: AgentAction
@@ -221,6 +235,9 @@ async def decide_next_action(
         "Tone and length:\n"
         "- Keep every reply short and conversational: 2 to 3 short sentences. No long bullet lists in"
         " ask_clarifying_question or offer_ticket replies. Sound like a teammate, not a help article.\n"
+        "- Match the user's latest language. If they write in English, reply in English; if they"
+        " switch to Hindi, Bengali, or another language, switch with them unless they explicitly ask"
+        " for a different language.\n"
         "- Show emotional intelligence: acknowledge the user's situation, show empathy when they are"
         " blocked or frustrated, appreciate the detail they have already shared, and use light warmth"
         " only when the context genuinely supports it. Never sound cheerful about a failure or denial.\n"
@@ -250,6 +267,12 @@ async def decide_next_action(
     )
 
     try:
+        # No reasoning: this is effectively a constrained 4-way classifier
+        # (ask_clarifying_question / answer / offer_ticket / create_ticket)
+        # with hard guardrails enforced after the call (``_should_force_clarification``,
+        # clarificationCount cap, etc.). Reasoning_effort here added 1–3s of
+        # latency with no measurable quality lift on the decision itself —
+        # the LLM still produces the same JSON it did with reasoning on.
         raw = await llm.chat(
             [
                 {"role": "system", "content": system_prompt},
@@ -258,13 +281,13 @@ async def decide_next_action(
             json_mode=True,
             temperature=0.1,
             max_tokens=700,
-            reasoning=True,
         )
         parsed = _parse_json_object(raw)
     except Exception:
         parsed = None
 
-    decision = _coerce_decision(parsed, normalized_state, citations)
+    language = detect_reply_language(current_user_message)
+    decision = _coerce_decision(parsed, normalized_state, citations, language=language)
     clarification_count = int(normalized_state.get("clarificationCount") or 0)
     if _should_force_clarification(normalized_state, recent_messages, decision):
         forced_reply = decision.reply.strip() if decision.action == "ask_clarifying_question" else ""
@@ -273,6 +296,7 @@ async def decide_next_action(
                 decision.missing_facts,
                 citations,
                 clarification_count,
+                language=language,
             )
         return AgentDecision(
             action="ask_clarifying_question",
@@ -327,11 +351,33 @@ _CLARIFICATION_FALLBACKS: tuple[str, ...] = (
     "Got it. One last thing before I share what's likely going on — which device, version, or environment are you on (for example desktop app vs web, OS, or version number)?",
 )
 
+_CLARIFICATION_FALLBACKS_HI: tuple[str, ...] = (
+    "मैं मदद के लिए हूं। सही मार्गदर्शन देने के लिए क्या आप बता सकते हैं कि यह किस प्रोडक्ट या ऐप में हो रहा है?",
+    "धन्यवाद। क्या आप वह सटीक स्टेप या स्क्रीन बता सकते हैं जहां यह दिक्कत आती है, और जो भी एरर दिख रहा है उसका शब्दशः टेक्स्ट भी साझा कर सकते हैं?",
+    "समझ गया। मैं संभावित कारण बताने से पहले एक आखिरी बात जानना चाहूंगा — आप किस डिवाइस, वर्जन, या एनवायरनमेंट पर हैं, जैसे डेस्कटॉप ऐप, वेब, ओएस, या वर्जन नंबर?",
+)
+
+_CLARIFICATION_FALLBACKS_BN: tuple[str, ...] = (
+    "আমি সাহায্য করতে প্রস্তুত। ঠিক নির্দেশনা দিতে হলে বলবেন কি, এটা কোন প্রোডাক্ট বা অ্যাপে হচ্ছে?",
+    "ধন্যবাদ। কোন নির্দিষ্ট ধাপ বা স্ক্রিনে এই সমস্যাটা হচ্ছে, আর কোনো এরর দেখালে সেটার হুবহু লেখাটাও কি শেয়ার করবেন?",
+    "বুঝেছি। সম্ভাব্য কারণ বলার আগে আর একটাই তথ্য দরকার — আপনি কোন ডিভাইস, ভার্সন, বা এনভায়রনমেন্টে আছেন, যেমন ডেস্কটপ অ্যাপ, ওয়েব, ওএস, বা ভার্সন নম্বর?",
+)
+
+
+def _clarification_fallbacks_for_language(language: str) -> tuple[str, ...]:
+    if language == "hi":
+        return _CLARIFICATION_FALLBACKS_HI
+    if language == "bn":
+        return _CLARIFICATION_FALLBACKS_BN
+    return _CLARIFICATION_FALLBACKS
+
 
 def _build_grounded_clarifying_question(
     missing_facts: list[str],
     citations: list[dict[str, Any]],
     clarification_count: int,
+    *,
+    language: str = "en",
 ) -> str:
     fact_index = max(0, clarification_count)
     facts = [item.strip() for item in missing_facts if item and item.strip()]
@@ -342,14 +388,17 @@ def _build_grounded_clarifying_question(
             if lowered.startswith(("whether ", "which ", "what ", "when ", "where ", "who ", "why ", "how ", "if ")):
                 return f"Thanks — could you confirm {lowered}?"
             return f"Thanks — could you share {lowered}?"
-    fallback_index = min(fact_index, len(_CLARIFICATION_FALLBACKS) - 1)
-    return _CLARIFICATION_FALLBACKS[fallback_index]
+    fallbacks = _clarification_fallbacks_for_language(language)
+    fallback_index = min(fact_index, len(fallbacks) - 1)
+    return fallbacks[fallback_index]
 
 
 def _coerce_decision(
     parsed: dict[str, Any] | None,
     state: dict[str, Any],
     citations: list[dict[str, Any]],
+    *,
+    language: str = "en",
 ) -> AgentDecision:
     summary = str((parsed or {}).get("summary") or state.get("summary") or "").strip()
     known_facts = _normalize_string_list((parsed or {}).get("knownFacts"), limit=_MAX_FACTS)
@@ -366,14 +415,35 @@ def _coerce_decision(
 
     reply = str((parsed or {}).get("reply") or "").strip()
     if action == "ask_clarifying_question" and not reply:
-        reply = "Could you share the exact product area and the step where this is failing?"
+        if language == "hi":
+            reply = "क्या आप वह सटीक प्रोडक्ट एरिया और स्टेप बता सकते हैं जहां यह समस्या आ रही है?"
+        elif language == "bn":
+            reply = "কোন নির্দিষ্ট প্রোডাক্ট এরিয়ায় এবং কোন ধাপে এই সমস্যাটা হচ্ছে, সেটা কি জানাবেন?"
+        else:
+            reply = "Could you share the exact product area and the step where this is failing?"
     if action == "offer_ticket" and not reply:
-        reply = (
-            "I'm sorry the earlier steps haven't sorted this. If you'd like, I can open a support "
-            "ticket so a human teammate can pick it up — just say the word and I'll create it."
-        )
+        if language == "hi":
+            reply = (
+                "मुझे अफसोस है कि पहले के स्टेप्स से समस्या हल नहीं हुई। अगर आप चाहें, तो मैं एक सपोर्ट टिकट "
+                "खोल सकता हूं ताकि हमारी मानव टीम इसे आगे संभाल सके — बस कह दीजिए, मैं बना दूंगा।"
+            )
+        elif language == "bn":
+            reply = (
+                "দুঃখিত, আগের ধাপগুলোতে সমস্যার সমাধান হয়নি। চাইলে আমি একটি সাপোর্ট টিকিট খুলে দিতে পারি "
+                "যাতে মানব টিম এটা নিয়ে এগোতে পারে — বললেই আমি করে দিচ্ছি।"
+            )
+        else:
+            reply = (
+                "I'm sorry the earlier steps haven't sorted this. If you'd like, I can open a support "
+                "ticket so a human teammate can pick it up — just say the word and I'll create it."
+            )
     if action == "create_ticket" and not reply:
-        reply = "Thanks for confirming — creating a support ticket now with a summary of what we've tried."
+        if language == "hi":
+            reply = "पुष्टि के लिए धन्यवाद — अब मैं हमारी कोशिशों का सार जोड़कर एक सपोर्ट टिकट बना रहा हूं।"
+        elif language == "bn":
+            reply = "নিশ্চিত করার জন্য ধন্যবাদ — আমরা যা যা চেষ্টা করেছি তার সারাংশ দিয়ে আমি এখন একটি সাপোর্ট টিকিট তৈরি করছি।"
+        else:
+            reply = "Thanks for confirming — creating a support ticket now with a summary of what we've tried."
 
     if action == "answer":
         reply = ""
@@ -739,6 +809,8 @@ async def rewrite_to_topic(
         "- Rewrite the answer so it stays strictly on the product, feature, and scope named in"
         " that query. Remove any recommendation, cause, or step that is about a different"
         " product or feature, even if a snippet mentioned it.\n"
+        "- Preserve the original answer language and script. If the answer being repaired is in"
+        " Bengali, Hindi, English, or another language, keep the rewrite in that same language.\n"
         "- Use ONLY the numbered snippets, and only the parts of those snippets that are about the"
         " product/feature in the user's query. Cite snippets inline as [n].\n"
         "- Preserve the warm, brief, conversational tone and the original stage shape (Stage 1"
@@ -806,6 +878,8 @@ async def rewrite_to_ground(
         "present in the cited snippets. Rewrite the answer so every claim is supported by the snippets:\n"
         "- Remove or replace any specific UI label, menu path, button name, command, URL, or error "
         "code that is not in the snippets.\n"
+        "- Preserve the original answer language and script. If the answer being repaired is in "
+        "Bengali, Hindi, English, or another language, keep the rewrite in that same language.\n"
         "- Keep the same overall recommendation in plain language. If a snippet describes the action "
         "narratively (e.g. 'switched audio device fixed it'), recommend that action plainly without "
         "inventing UI controls.\n"
