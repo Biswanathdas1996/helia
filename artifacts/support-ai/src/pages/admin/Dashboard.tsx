@@ -604,6 +604,11 @@ export default function AdminDashboard() {
                   >
                     {business.deflectionRate}%
                   </p>
+                  <p className="max-w-[14rem] text-right text-[10px] leading-snug text-muted-foreground tabular-nums">
+                    {business.aiResolved + business.ticketsCreatedFromChat > 0
+                      ? `${business.aiResolved} ÷ (${business.aiResolved} + ${business.ticketsCreatedFromChat})`
+                      : "No AI-resolved vs. ticket-created outcomes in this window"}
+                  </p>
                 </div>
               ) : null}
             </div>

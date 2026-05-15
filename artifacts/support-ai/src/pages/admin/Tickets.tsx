@@ -67,7 +67,9 @@ export default function AdminTickets() {
                 >
                   <TableCell className="font-mono text-xs text-muted-foreground">#{ticket.id}</TableCell>
                   <TableCell className="font-medium max-w-xs truncate">{ticket.subject}</TableCell>
-                  <TableCell className="text-sm text-muted-foreground">{ticket.createdByName ?? ticket.createdBy}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {ticket.createdByName?.trim() || "Unknown user"}
+                  </TableCell>
                   <TableCell>
                     <Badge variant="outline" className={`capitalize ${getPriorityColor(ticket.priority)}`}>
                       {ticket.priority}

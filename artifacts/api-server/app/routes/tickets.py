@@ -5,6 +5,7 @@ import random
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from starlette.responses import Response
 
 from app import zoho
 from app.audit import audit_log
@@ -27,14 +28,57 @@ def _parse_id(raw: str) -> int:
     return n
 
 
-def _format_user_name(u: dict[str, object]) -> str | None:
+def _user_display_name(u: dict[str, object]) -> str:
     first = (u.get("firstName") or "").strip() if isinstance(u.get("firstName"), str) else ""
     last = (u.get("lastName") or "").strip() if isinstance(u.get("lastName"), str) else ""
     full = f"{first} {last}".strip()
     if full:
         return full
     email = u.get("email")
-    return email if isinstance(email, str) and email else None
+    if isinstance(email, str) and email.strip():
+        return email.strip()
+    uid = u.get("_id")
+    return str(uid) if uid is not None else "Unknown user"
+
+
+def _user_id_variants(uid: object) -> list[object]:
+    """Atlas may store tickets.userId as int while users._id is str (or the reverse)."""
+    out = [uid]
+    if isinstance(uid, int):
+        out.append(str(uid))
+    elif isinstance(uid, str) and uid.isdigit():
+        out.append(int(uid))
+    return out
+
+
+def _collect_user_id_query_variants(rows: list[dict[str, object]]) -> list[object]:
+    seen: set[object] = set()
+    variants: list[object] = []
+    for r in rows:
+        uid = r.get("userId")
+        if uid is None:
+            continue
+        for v in _user_id_variants(uid):
+            if v not in seen:
+                seen.add(v)
+                variants.append(v)
+    return variants
+
+
+def _register_creator_names(name_map: dict[object, str], user_doc: dict[str, object]) -> None:
+    label = _user_display_name(user_doc)
+    for v in _user_id_variants(user_doc["_id"]):
+        name_map[v] = label
+
+
+def _lookup_creator_name(name_map: dict[object, str], uid: object | None) -> str | None:
+    if uid is None:
+        return None
+    for v in _user_id_variants(uid):
+        got = name_map.get(v)
+        if got is not None:
+            return got
+    return None
 
 
 @router.get("/tickets")
@@ -43,18 +87,16 @@ async def list_tickets(user: AuthedUser = Depends(require_auth)) -> list[dict[st
     is_admin = user.role == "admin"
     flt: dict[str, object] = {} if is_admin else {"userId": user.userId}
     rows = await db.tickets.find(flt).sort("createdAt", -1).to_list(length=None)
-    user_ids = {r.get("userId") for r in rows if r.get("userId")}
-    name_map: dict[str, str] = {}
-    if user_ids:
-        users = await db.users.find({"_id": {"$in": list(user_ids)}}).to_list(length=None)
+    variants = _collect_user_id_query_variants(rows)
+    name_map: dict[object, str] = {}
+    if variants:
+        users = await db.users.find({"_id": {"$in": variants}}).to_list(length=None)
         for u in users:
-            name = _format_user_name(u)
-            if name:
-                name_map[u["_id"]] = name
+            _register_creator_names(name_map, u)
     out: list[dict[str, object]] = []
     for r in rows:
         t = serialize_ticket(r)
-        t["createdByName"] = name_map.get(r.get("userId"))
+        t["createdByName"] = _lookup_creator_name(name_map, r.get("userId"))
         out.append(t)
     return out
 
@@ -207,8 +249,10 @@ async def update_ticket(
     return serialize_ticket(r or existing)
 
 
-@router.delete("/tickets/{id}", status_code=204)
-async def delete_ticket(id: str, user: AuthedUser = Depends(require_auth)) -> None:
+@router.delete("/tickets/{id}", status_code=204, response_class=Response)
+async def delete_ticket(
+    id: str, user: AuthedUser = Depends(require_auth)
+) -> Response:
     tid = _parse_id(id)
     db = await get_db()
     existing = await db.tickets.find_one({"_id": tid})
@@ -226,3 +270,4 @@ async def delete_ticket(id: str, user: AuthedUser = Depends(require_auth)) -> No
         target=str(existing.get("externalId") or tid),
         meta={"ticketId": tid, "subject": existing.get("subject")},
     )
+    return Response(status_code=204)

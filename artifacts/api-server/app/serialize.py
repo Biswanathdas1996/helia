@@ -84,7 +84,7 @@ def serialize_ticket(t: dict[str, Any]) -> dict[str, Any]:
         "priority": t["priority"],
         "status": t["status"],
         "externalId": t.get("externalId"),
-        "createdBy": t["userId"],
+        "createdBy": str(t["userId"]),
         "relatedMessageId": t.get("relatedMessageId"),
         "lastUpdate": t.get("lastUpdate"),
         "createdAt": iso(t["createdAt"]),

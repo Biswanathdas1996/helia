@@ -1,0 +1,21 @@
+Category,Name,Type,Required,Notes / key configuration
+Runtime,Web frontend,Static SPA + nginx (support-ai Docker image),Yes,Serves React build; proxies /api to API; see artifacts/support-ai/nginx.conf
+Runtime,API server,FastAPI (Python) uvicorn :8080,Yes,artifacts/api-server; paths under /api; health /api/healthz; metrics /api/metrics
+Runtime,Redis,Redis 7,Yes,REDIS_URL; cache + cross-replica rate limits; optional for single replica (in-process fallback)
+Data,MongoDB,Document database,Yes,MONGODB_URI; Motor async client
+Data,MongoDB Atlas Vector Search,Search index on chunk embeddings,Optional,MONGODB_VECTOR_SEARCH=true; MONGODB_VECTOR_INDEX; EMBEDDING_DIM; see infra/atlas-vector-index.json
+External SaaS,PwC GenAI gateway,LLM + embeddings API,Yes,PWC_AI_API_KEY; PWC_TOKEN; PWC_CHAT_MODEL; PWC_EMBEDDING_MODEL; PWC_CHAT_MODEL_FALLBACKS
+External SaaS,Clerk,Authentication,Yes if using Clerk,VITE_CLERK_PUBLISHABLE_KEY (web build-time); CLERK_SECRET_KEY + NODE_ENV=production (API proxy /api/__clerk)
+External SaaS,Zoho Desk,Ticketing mirror via REST OAuth,Optional,ZOHO_* vars in .env.example
+External SaaS,Zoho Desk MCP transport,Zoho via MCP endpoint,Optional,MCP_ENABLED; MCP_ENDPOINT_URL; MCP_AUTH_TOKEN; FORCE_MCP_TICKET_CREATION
+External SaaS,Cohere,Reranking,Optional,COHERE_API_KEY; COHERE_RERANK_MODEL; or DISABLE_RERANK=true
+External SaaS,Mem0,Agent memory API,Optional,MEM0_API_KEY
+Platform,Container images,OCI images for web + api,Yes (non-Replit),Example: ghcr.io/your-org/helia-web; helia-api per infra/k8s
+Platform,Container registry,GHCR or other,Yes for K8s/CI,Push/pull images; replace placeholders in infra/k8s
+Platform,Orchestration,Docker Compose or Kubernetes,Depends,Docker: docker-compose.yml; K8s: infra/k8s/*.yaml
+Platform,Ingress + TLS,HTTPS termination + routing,Yes for public prod,Route / to web; /api to api; long timeouts for streaming (see web Ingress annotations)
+Platform,Secrets store,K8s Secret / vault / env files,Yes,MONGODB_URI; SESSION_SECRET; PWC keys; Clerk secret; Zoho/MCP as used
+Platform,Observability (metrics),Prometheus-compatible scrape,Optional,Scrape /api/metrics from API pods
+Build-time (web),Vite env,Zoho Desk deep-link URLs,Optional,VITE_ZOHO_DESK_ORG_ID; VITE_ZOHO_DESK_WEB_ORIGIN; VITE_ZOHO_DESK_TICKET_URL_TEMPLATE
+App config,Session & security,Cookie sessions,Yes,SESSION_SECRET; HELIA_ADMIN_EMAILS optional
+App config,Rate limits,Per-route limits,Optional,RATE_LIMIT_CHAT; RATE_LIMIT_AUTH; RATE_LIMIT_DEFAULT

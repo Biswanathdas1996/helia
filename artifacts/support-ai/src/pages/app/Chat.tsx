@@ -47,6 +47,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   AlertDialog,
@@ -1515,25 +1516,99 @@ export default function Chat() {
                 )}
                 {msg.role === 'assistant' ? (
                   <div className="w-full space-y-3">
-                    {splitAssistantSegments(msg.content).map((segment, segmentIdx, segments) => (
-                      <motion.div
-                        key={`${msg.id}-segment-${segmentIdx}`}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.22, delay: segmentIdx * 0.08, ease: "easeOut" }}
-                        className="w-full px-5 py-4 rounded-[24px] rounded-tl-md text-sm bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] text-foreground ring-1 ring-white/70 backdrop-blur-sm"
-                      >
-                        {renderAssistantContent(segment)}
-                        {segmentIdx === segments.length - 1 && (msg as { rewrittenQuery?: string | null }).rewrittenQuery && (
-                          <div className="mt-4 pt-3 border-t border-border/50">
-                            <p className="text-[11px] leading-snug text-muted-foreground/80">
-                              <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Searching for:</span>
-                              <span className="italic">{(msg as { rewrittenQuery?: string | null }).rewrittenQuery}</span>
-                            </p>
-                          </div>
-                        )}
-                      </motion.div>
-                    ))}
+                    {splitAssistantSegments(msg.content).map((segment, segmentIdx, segments) => {
+                      const rewritten = (msg as { rewrittenQuery?: string | null }).rewrittenQuery?.trim() ?? "";
+                      const citeList = msg.citations ?? [];
+                      const showSourcesAccordion =
+                        segmentIdx === segments.length - 1
+                        && (rewritten.length > 0 || citeList.length > 0);
+                      const sourcesTriggerLabel =
+                        rewritten.length > 0 && citeList.length > 0
+                          ? "Sources & search query"
+                          : rewritten.length > 0
+                            ? "Search query"
+                            : "Sources";
+
+                      return (
+                        <motion.div
+                          key={`${msg.id}-segment-${segmentIdx}`}
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.22, delay: segmentIdx * 0.08, ease: "easeOut" }}
+                          className="w-full px-5 py-4 rounded-[24px] rounded-tl-md text-sm bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] text-foreground ring-1 ring-white/70 backdrop-blur-sm"
+                        >
+                          {renderAssistantContent(segment)}
+                          {showSourcesAccordion && (
+                            <Accordion type="single" collapsible className="mt-4 w-full border-t border-border/50 pt-0">
+                              <AccordionItem value={`sources-${msg.id}`} className="border-0">
+                                <AccordionTrigger className="py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70 hover:no-underline [&[data-state=open]]:pb-1">
+                                  {sourcesTriggerLabel}
+                                </AccordionTrigger>
+                                <AccordionContent className="space-y-3 pb-0 pt-0">
+                                  {rewritten.length > 0 && (
+                                    <p className="text-[11px] leading-snug text-muted-foreground/80 pr-6">
+                                      <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Searching for:</span>
+                                      <span className="italic">{rewritten}</span>
+                                    </p>
+                                  )}
+                                  {citeList.length > 0 && (
+                                    <div className="flex flex-wrap gap-1">
+                                      {citeList.map((cite, idx) => (
+                                        <Popover key={idx}>
+                                          <PopoverTrigger asChild>
+                                            <Badge variant="outline" className="cursor-pointer hover:bg-accent text-xs py-0 h-6 font-normal text-muted-foreground border-border/70 bg-background/80">
+                                              [{idx + 1}] {cite.documentName}
+                                            </Badge>
+                                          </PopoverTrigger>
+                                          <PopoverContent
+                                            className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden p-0"
+                                            align="start"
+                                            side="bottom"
+                                            collisionPadding={16}
+                                          >
+                                            <div className="shrink-0 border-b border-border px-4 py-3">
+                                              <div className="font-medium flex items-start gap-2">
+                                                <FileText className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                                                <span className="min-w-0 break-words">{cite.documentName}</span>
+                                              </div>
+                                            </div>
+                                            <div className="max-h-[min(70vh,26rem)] overflow-y-auto px-4 py-3">
+                                              <p className="whitespace-pre-wrap break-words text-muted-foreground leading-relaxed">
+                                                {`"...${cite.snippet}..."`}
+                                              </p>
+                                              <div className="mt-3">
+                                                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
+                                                  Chunk Metadata
+                                                </p>
+                                                <pre className="max-w-full whitespace-pre-wrap break-words text-[11px] leading-relaxed bg-muted/60 border border-border rounded p-2 overflow-x-auto">
+{JSON.stringify(
+  {
+    fileName: cite.metadata?.fileName ?? cite.documentName,
+    pageNumber: cite.metadata?.pageNumber ?? null,
+    keyPhrases: cite.metadata?.keyPhrases ?? [],
+    chunkPosition: cite.metadata?.chunkPosition ?? null,
+    tokenCount: cite.metadata?.tokenCount ?? null,
+    sourceType: cite.metadata?.sourceType ?? null,
+    score: Number(cite.score.toFixed(3)),
+  },
+  null,
+  2,
+)}
+                                                </pre>
+                                              </div>
+                                            </div>
+                                          </PopoverContent>
+                                        </Popover>
+                                      ))}
+                                    </div>
+                                  )}
+                                </AccordionContent>
+                              </AccordionItem>
+                            </Accordion>
+                          )}
+                        </motion.div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="flex flex-col items-end gap-2">
@@ -1552,85 +1627,30 @@ export default function Chat() {
                   </div>
                 )}
 
-                {msg.role === 'assistant' && (
-                  <div className="flex flex-wrap items-center gap-2 mt-1">
-                    {msg.citations && msg.citations.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {msg.citations.map((cite, idx) => (
-                          <Popover key={idx}>
-                            <PopoverTrigger asChild>
-                              <Badge variant="outline" className="cursor-pointer hover:bg-accent text-xs py-0 h-6 font-normal text-muted-foreground border-border/70 bg-background/80">
-                                [{idx + 1}] {cite.documentName}
-                              </Badge>
-                            </PopoverTrigger>
-                            <PopoverContent
-                              className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden p-0"
-                              align="start"
-                              side="bottom"
-                              collisionPadding={16}
-                            >
-                              <div className="shrink-0 border-b border-border px-4 py-3">
-                                <div className="font-medium flex items-start gap-2">
-                                  <FileText className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                                  <span className="min-w-0 break-words">{cite.documentName}</span>
-                                </div>
-                              </div>
-                              <div className="max-h-[min(70vh,26rem)] overflow-y-auto px-4 py-3">
-                                <p className="whitespace-pre-wrap break-words text-muted-foreground leading-relaxed">
-                                  {`"...${cite.snippet}..."`}
-                                </p>
-                                <div className="mt-3">
-                                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
-                                    Chunk Metadata
-                                  </p>
-                                  <pre className="max-w-full whitespace-pre-wrap break-words text-[11px] leading-relaxed bg-muted/60 border border-border rounded p-2 overflow-x-auto">
-{JSON.stringify(
-  {
-    fileName: cite.metadata?.fileName ?? cite.documentName,
-    pageNumber: cite.metadata?.pageNumber ?? null,
-    keyPhrases: cite.metadata?.keyPhrases ?? [],
-    chunkPosition: cite.metadata?.chunkPosition ?? null,
-    tokenCount: cite.metadata?.tokenCount ?? null,
-    sourceType: cite.metadata?.sourceType ?? null,
-    score: Number(cite.score.toFixed(3)),
-  },
-  null,
-  2,
-)}
-                                  </pre>
-                                </div>
-                              </div>
-                            </PopoverContent>
-                          </Popover>
-                        ))}
+                {msg.role === "assistant"
+                  && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === "answer"
+                  && !(msg as { finalVerdict?: boolean }).finalVerdict && (
+                    <div className="flex w-full justify-end gap-2 mt-1">
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={`h-6 w-6 rounded-full ${msg.rating === "up" ? "text-green-600 bg-green-50 dark:bg-green-900/20" : "text-muted-foreground"}`}
+                          onClick={() => handleRate(msg.id, "up")}
+                        >
+                          <ThumbsUp className="h-3 w-3" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={`h-6 w-6 rounded-full ${msg.rating === "down" ? "text-destructive bg-destructive/10" : "text-muted-foreground"}`}
+                          onClick={() => handleRate(msg.id, "down")}
+                        >
+                          <ThumbsDown className="h-3 w-3" />
+                        </Button>
                       </div>
-                    )}
-                    
-                    <div className="flex items-center gap-1 ml-auto">
-                      {messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === "answer"
-                        && !(msg as { finalVerdict?: boolean }).finalVerdict && (
-                        <>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className={`h-6 w-6 rounded-full ${msg.rating === "up" ? "text-green-600 bg-green-50 dark:bg-green-900/20" : "text-muted-foreground"}`}
-                            onClick={() => handleRate(msg.id, "up")}
-                          >
-                            <ThumbsUp className="h-3 w-3" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className={`h-6 w-6 rounded-full ${msg.rating === "down" ? "text-destructive bg-destructive/10" : "text-muted-foreground"}`}
-                            onClick={() => handleRate(msg.id, "down")}
-                          >
-                            <ThumbsDown className="h-3 w-3" />
-                          </Button>
-                        </>
-                      )}
                     </div>
-                  </div>
-                )}
+                  )}
 
                 {msg.role === "assistant"
                   && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === "answer"
