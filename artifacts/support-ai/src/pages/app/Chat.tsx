@@ -40,6 +40,11 @@ import {
   Lightbulb,
   Search,
   BookOpen,
+  Mic,
+  MicOff,
+  Volume2,
+  Keyboard,
+  Square,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -825,6 +830,161 @@ async function* iterSseEvents(
   }
 }
 
+type VoiceChatPanelProps = {
+  isListening: boolean;
+  isSpeaking: boolean;
+  isStreaming: boolean;
+  interimTranscript: string;
+  voiceError: string | null;
+  speechSupported: boolean;
+  onToggleMic: () => void;
+  onStopSpeaking: () => void;
+};
+
+function VoiceChatPanel({
+  isListening,
+  isSpeaking,
+  isStreaming,
+  interimTranscript,
+  voiceError,
+  speechSupported,
+  onToggleMic,
+  onStopSpeaking,
+}: VoiceChatPanelProps) {
+  const status: {
+    label: string;
+    hint: string;
+    tone: "idle" | "listening" | "thinking" | "speaking";
+  } = isListening
+    ? {
+        label: "Listening…",
+        hint: interimTranscript
+          ? `“${interimTranscript}”`
+          : "Speak when you're ready. I'll respond out loud.",
+        tone: "listening",
+      }
+    : isStreaming
+      ? {
+          label: "Thinking…",
+          hint: "Generating a spoken reply.",
+          tone: "thinking",
+        }
+      : isSpeaking
+        ? {
+            label: "Helia is speaking…",
+            hint: "Tap the mic to interrupt and respond.",
+            tone: "speaking",
+          }
+        : {
+            label: "Tap the mic to talk",
+            hint: speechSupported
+              ? "I'll listen, then reply out loud. Tap again to stop."
+              : "Voice chat needs a browser with SpeechRecognition (Chrome/Edge).",
+            tone: "idle",
+          };
+
+  const busy = isStreaming;
+  const micActive = isListening;
+  const showStopSpeaking = isSpeaking && !isListening;
+
+  return (
+    <div className="flex w-full flex-col items-center gap-3">
+      <div className="relative flex h-[88px] w-[88px] items-center justify-center">
+        {(micActive || isSpeaking) && (
+          <>
+            <span
+              aria-hidden
+              className={cn(
+                "absolute inset-0 rounded-full opacity-60 blur-md animate-ping",
+                micActive
+                  ? "bg-red-500/40"
+                  : isSpeaking
+                    ? "bg-primary/40"
+                    : "bg-transparent",
+              )}
+            />
+            <span
+              aria-hidden
+              className={cn(
+                "absolute inset-2 rounded-full opacity-50",
+                micActive
+                  ? "bg-red-500/30"
+                  : isSpeaking
+                    ? "bg-primary/30"
+                    : "bg-transparent",
+              )}
+            />
+          </>
+        )}
+        <button
+          type="button"
+          onClick={onToggleMic}
+          disabled={busy || !speechSupported}
+          aria-pressed={micActive}
+          aria-label={
+            micActive ? "Stop listening" : "Tap to speak to Helia AI"
+          }
+          className={cn(
+            "relative z-[1] flex h-16 w-16 items-center justify-center rounded-full text-white shadow-lg transition-transform focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60",
+            micActive
+              ? "bg-red-500 hover:bg-red-500/90 ring-4 ring-red-500/20"
+              : isSpeaking
+                ? "bg-primary hover:bg-primary/90 ring-4 ring-primary/15"
+                : "bg-primary hover:bg-primary/90",
+            !busy && "hover:scale-[1.02] active:scale-[0.98]",
+          )}
+        >
+          {busy ? (
+            <Loader2 className="h-7 w-7 animate-spin" />
+          ) : micActive ? (
+            <MicOff className="h-7 w-7" />
+          ) : isSpeaking ? (
+            <Volume2 className="h-7 w-7" />
+          ) : (
+            <Mic className="h-7 w-7" />
+          )}
+        </button>
+      </div>
+
+      <div className="min-h-[40px] text-center">
+        <p
+          className={cn(
+            "text-sm font-semibold",
+            status.tone === "listening" && "text-red-500",
+            status.tone === "speaking" && "text-primary",
+            status.tone === "thinking" && "text-foreground",
+            status.tone === "idle" && "text-foreground",
+          )}
+        >
+          {status.label}
+        </p>
+        <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+          {status.hint}
+        </p>
+      </div>
+
+      {showStopSpeaking && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7 gap-1.5 rounded-full px-3 text-[11px]"
+          onClick={onStopSpeaking}
+        >
+          <Square className="h-3 w-3" />
+          Stop voice
+        </Button>
+      )}
+
+      {voiceError && (
+        <p className="max-w-md text-center text-[11px] text-destructive">
+          {voiceError}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function Chat() {
   const [location, setLocation] = useLocation();
   const params = useParams<{ id?: string }>();
@@ -898,6 +1058,30 @@ export default function Chat() {
   const [isClearingMemory, setIsClearingMemory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // ----- Voice chat state -----
+  type ChatMode = "text" | "voice";
+  const [chatMode, setChatMode] = useState<ChatMode>("text");
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const speechRecognitionRef = useRef<any>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioObjectUrlRef = useRef<string | null>(null);
+  const chatModeRef = useRef<ChatMode>("text");
+  const shouldAutoListenRef = useRef<boolean>(false);
+  const speechSupported = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    return Boolean(
+      (window as any).SpeechRecognition ||
+        (window as any).webkitSpeechRecognition,
+    );
+  }, []);
+
+  useEffect(() => {
+    chatModeRef.current = chatMode;
+  }, [chatMode]);
 
   const memoryGraph = useQuery<MemoryGraphResponse>({
     queryKey: ["chat-memory-graph", currentId],
@@ -1037,6 +1221,388 @@ export default function Chat() {
     };
   }, []);
 
+  // ----- Voice chat helpers -----
+  const stopSpeaking = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      try {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      } catch {
+        // ignore
+      }
+    }
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = null;
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
+    }
+    setIsSpeaking(false);
+  }, []);
+
+  const pickIndianEnglishFemaleVoice = useCallback(
+    (voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null => {
+      if (!voices?.length) return null;
+
+      // Known Indian English female voice names across major TTS engines.
+      // Microsoft (Windows/Edge): "Heera", "Kalpana", "Neerja", "Aarohi"
+      // Apple (macOS/iOS):        "Veena", "Rishi" (male), "Lekha" (hi-IN)
+      // Google (Chrome/Android):  "Google English (India)", "Google हिन्दी"
+      // Samsung / others:         "Raveena", "Indian English Female"
+      const femaleNameHints = [
+        "heera",
+        "kalpana",
+        "neerja",
+        "aarohi",
+        "veena",
+        "raveena",
+        "lekha",
+        "priya",
+        "shruti",
+        "deepa",
+        "asha",
+        "indian english female",
+        "female",
+      ];
+
+      const isIndianEnglish = (v: SpeechSynthesisVoice) => {
+        const lang = (v.lang || "").toLowerCase();
+        return lang === "en-in" || lang.startsWith("en-in");
+      };
+
+      const looksFemale = (v: SpeechSynthesisVoice) => {
+        const name = (v.name || "").toLowerCase();
+        if (name.includes("male") && !name.includes("female")) return false;
+        return femaleNameHints.some((hint) => name.includes(hint));
+      };
+
+      // 1) Indian English + clearly female by name.
+      const inFemale = voices.find((v) => isIndianEnglish(v) && looksFemale(v));
+      if (inFemale) return inFemale;
+
+      // 2) Any Indian English voice (Google's en-IN default is female-sounding).
+      const inAny = voices.find(isIndianEnglish);
+      if (inAny) return inAny;
+
+      // 3) Hindi voice (hi-IN) — still Indian accent when speaking English words.
+      const hiFemale = voices.find(
+        (v) =>
+          (v.lang || "").toLowerCase().startsWith("hi-in") && looksFemale(v),
+      );
+      if (hiFemale) return hiFemale;
+      const hiAny = voices.find((v) =>
+        (v.lang || "").toLowerCase().startsWith("hi-in"),
+      );
+      if (hiAny) return hiAny;
+
+      // 4) Last resort: any English female voice.
+      const enFemale = voices.find(
+        (v) =>
+          (v.lang || "").toLowerCase().startsWith("en") && looksFemale(v),
+      );
+      if (enFemale) return enFemale;
+
+      return voices[0] ?? null;
+    },
+    [],
+  );
+
+  const speakWithBrowserTts = useCallback(
+    (text: string) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+        setIsSpeaking(false);
+        setVoiceError(
+          "Voice playback is unavailable: this browser has no built-in speech synthesis.",
+        );
+        return;
+      }
+
+      const synth = window.speechSynthesis;
+
+      const speakOnce = () => {
+        try {
+          synth.cancel();
+          const utter = new SpeechSynthesisUtterance(text);
+          const chosen = pickIndianEnglishFemaleVoice(synth.getVoices());
+          if (chosen) {
+            utter.voice = chosen;
+            utter.lang = chosen.lang || "en-IN";
+          } else {
+            utter.lang = "en-IN";
+          }
+          // Slightly slower, slightly warmer pitch produces a more natural,
+          // polite Indian English cadence rather than a flat robotic delivery.
+          utter.rate = 0.95;
+          utter.pitch = 1.05;
+          utter.volume = 1;
+          utter.onend = () => {
+            setIsSpeaking(false);
+            if (
+              chatModeRef.current === "voice" &&
+              shouldAutoListenRef.current &&
+              !chatEndedWithTicket
+            ) {
+              startListeningRef.current?.();
+            }
+          };
+          utter.onerror = () => {
+            setIsSpeaking(false);
+          };
+          synth.speak(utter);
+        } catch (err) {
+          setIsSpeaking(false);
+          setVoiceError(
+            (err as Error)?.message ?? "Could not play voice response.",
+          );
+        }
+      };
+
+      // Chrome populates voices asynchronously; wait for them once if needed
+      // so the Indian English voice is actually picked instead of the default.
+      const voices = synth.getVoices();
+      if (!voices || voices.length === 0) {
+        const handleVoicesChanged = () => {
+          synth.removeEventListener("voiceschanged", handleVoicesChanged);
+          speakOnce();
+        };
+        synth.addEventListener("voiceschanged", handleVoicesChanged);
+        // Safety fallback — some browsers never fire the event.
+        window.setTimeout(() => {
+          synth.removeEventListener("voiceschanged", handleVoicesChanged);
+          speakOnce();
+        }, 400);
+      } else {
+        speakOnce();
+      }
+    },
+    [chatEndedWithTicket, pickIndianEnglishFemaleVoice],
+  );
+
+  const stopListening = useCallback(() => {
+    const rec = speechRecognitionRef.current;
+    shouldAutoListenRef.current = false;
+    if (rec) {
+      try {
+        rec.stop();
+      } catch {
+        // ignore
+      }
+    }
+    setIsListening(false);
+    setInterimTranscript("");
+  }, []);
+
+  const speakText = useCallback(
+    async (text: string) => {
+      const clean = (text || "").trim();
+      if (!clean) return;
+      try {
+        stopSpeaking();
+        setIsSpeaking(true);
+        setVoiceError(null);
+        const res = await fetch("/api/chat/tts", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: clean }),
+        });
+        if (!res.ok) {
+          // Server signalled a hard failure — fall back to the browser's
+          // built-in speech synthesis so the user still hears the reply.
+          speakWithBrowserTts(clean);
+          return;
+        }
+
+        const contentType = (res.headers.get("content-type") || "").toLowerCase();
+        if (contentType.includes("application/json")) {
+          // Backend told us to use the browser's SpeechSynthesis API
+          // (e.g. ElevenLabs returned 402 on a free plan).
+          let payload: { useBrowserTts?: boolean; text?: string } = {};
+          try {
+            payload = await res.json();
+          } catch {
+            payload = {};
+          }
+          if (payload?.useBrowserTts) {
+            speakWithBrowserTts(payload.text || clean);
+            return;
+          }
+          // Unexpected JSON shape — still fall back so the user hears something.
+          speakWithBrowserTts(clean);
+          return;
+        }
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        audioObjectUrlRef.current = url;
+        let audio = audioRef.current;
+        if (!audio) {
+          audio = new Audio();
+          audioRef.current = audio;
+        }
+        audio.src = url;
+        await audio.play().catch((err) => {
+          throw err;
+        });
+      } catch (err) {
+        // Network or playback error — last-ditch fallback to browser TTS.
+        try {
+          speakWithBrowserTts(clean);
+        } catch {
+          setIsSpeaking(false);
+          setVoiceError(
+            (err as Error)?.message ?? "Could not play voice response.",
+          );
+        }
+      }
+    },
+    [stopSpeaking, speakWithBrowserTts],
+  );
+
+  const startListening = useCallback(() => {
+    if (!speechSupported) {
+      setVoiceError(
+        "Voice input is not supported in this browser. Try Chrome or Edge.",
+      );
+      return;
+    }
+    if (isListening) return;
+    setVoiceError(null);
+
+    const Ctor =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+    const rec = new Ctor();
+    rec.lang = navigator.language || "en-US";
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    let finalText = "";
+
+    rec.onresult = (event: any) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result[0]?.transcript ?? "";
+        if (result.isFinal) {
+          finalText += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+      setInterimTranscript(interim);
+    };
+
+    rec.onerror = (event: any) => {
+      const code = event?.error ?? "unknown";
+      if (code === "no-speech" || code === "aborted") {
+        // benign, ignore
+      } else if (code === "not-allowed" || code === "service-not-allowed") {
+        setVoiceError("Microphone access was denied. Allow it in your browser settings.");
+      } else {
+        setVoiceError(`Voice input error: ${code}`);
+      }
+    };
+
+    rec.onend = () => {
+      setIsListening(false);
+      setInterimTranscript("");
+      speechRecognitionRef.current = null;
+      const transcript = finalText.trim();
+      if (transcript) {
+        void sendVoiceMessageRef.current?.(transcript);
+      } else if (shouldAutoListenRef.current) {
+        // Re-arm listening after a brief pause if nothing was captured
+        window.setTimeout(() => {
+          if (
+            chatModeRef.current === "voice" &&
+            shouldAutoListenRef.current &&
+            !isSpeaking
+          ) {
+            startListeningRef.current?.();
+          }
+        }, 400);
+      }
+    };
+
+    try {
+      rec.start();
+      speechRecognitionRef.current = rec;
+      setIsListening(true);
+    } catch (err) {
+      setVoiceError((err as Error)?.message ?? "Could not start listening.");
+      setIsListening(false);
+    }
+  }, [isListening, isSpeaking, speechSupported]);
+
+  // Forward refs so callbacks can call each other without circular deps
+  const sendVoiceMessageRef = useRef<((t: string) => Promise<void>) | null>(
+    null,
+  );
+  const startListeningRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    startListeningRef.current = startListening;
+  }, [startListening]);
+
+  // Hook the audio element's lifecycle
+  useEffect(() => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+    }
+    const audio = audioRef.current;
+    const handleEnded = () => {
+      setIsSpeaking(false);
+      if (audioObjectUrlRef.current) {
+        URL.revokeObjectURL(audioObjectUrlRef.current);
+        audioObjectUrlRef.current = null;
+      }
+      if (
+        chatModeRef.current === "voice" &&
+        shouldAutoListenRef.current &&
+        !chatEndedWithTicket
+      ) {
+        startListeningRef.current?.();
+      }
+    };
+    const handleError = () => {
+      setIsSpeaking(false);
+    };
+    audio.addEventListener("ended", handleEnded);
+    audio.addEventListener("error", handleError);
+    return () => {
+      audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("error", handleError);
+    };
+  }, [chatEndedWithTicket]);
+
+  // Cleanup voice state when leaving voice mode or unmounting
+  useEffect(() => {
+    if (chatMode !== "voice") {
+      shouldAutoListenRef.current = false;
+      stopListening();
+      stopSpeaking();
+    }
+    return () => {
+      shouldAutoListenRef.current = false;
+    };
+  }, [chatMode, stopListening, stopSpeaking]);
+
+  useEffect(() => {
+    return () => {
+      stopListening();
+      stopSpeaking();
+    };
+  }, [stopListening, stopSpeaking]);
+
   const streamMessage = useCallback(
     async (convoId: number, content: string, imageDataUrl?: string | null) => {
       const controller = new AbortController();
@@ -1150,6 +1716,17 @@ export default function Chat() {
               next[existing] = { name: "Completed", status: "completed" };
               return next;
             });
+            if (chatModeRef.current === "voice") {
+              const finalContent =
+                typeof final.content === "string"
+                  ? extractAssistantAnswer(final.content)
+                  : assistantAccum
+                    ? extractAssistantAnswer(assistantAccum)
+                    : "";
+              if (finalContent) {
+                void speakText(finalContent);
+              }
+            }
           }
         }
 
@@ -1176,8 +1753,72 @@ export default function Chat() {
         setProcessSteps([]);
       }
     },
-    [queryClient, toast],
+    [queryClient, toast, speakText],
   );
+
+  const sendVoiceMessage = useCallback(
+    async (transcript: string) => {
+      const content = transcript.trim();
+      if (!content) return;
+      if (isStreaming || chatEndedWithTicket) return;
+      stopSpeaking();
+      let convoId = currentId;
+      if (!convoId) {
+        try {
+          const newConvo = await createConvo.mutateAsync({
+            data: { title: content.substring(0, 40) },
+          });
+          convoId = newConvo.id;
+          setLocation(`/app/conversations/${convoId}`);
+          queryClient.invalidateQueries({
+            queryKey: getListConversationsQueryKey(),
+          });
+        } catch (err) {
+          toast({
+            title: "Failed to create conversation",
+            variant: "destructive",
+          });
+          return;
+        }
+      }
+      await streamMessage(convoId, content);
+    },
+    [
+      chatEndedWithTicket,
+      createConvo,
+      currentId,
+      isStreaming,
+      queryClient,
+      setLocation,
+      stopSpeaking,
+      streamMessage,
+      toast,
+    ],
+  );
+
+  useEffect(() => {
+    sendVoiceMessageRef.current = sendVoiceMessage;
+  }, [sendVoiceMessage]);
+
+  const toggleVoiceListening = useCallback(() => {
+    if (chatEndedWithTicket) return;
+    if (isSpeaking) {
+      stopSpeaking();
+    }
+    if (isListening) {
+      stopListening();
+    } else {
+      shouldAutoListenRef.current = true;
+      startListening();
+    }
+  }, [
+    chatEndedWithTicket,
+    isListening,
+    isSpeaking,
+    startListening,
+    stopListening,
+    stopSpeaking,
+  ]);
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
@@ -2386,75 +3027,133 @@ export default function Chat() {
               </span>
             </div>
           ) : (
-            <form
-              onSubmit={handleSubmit}
-              className="max-w-4xl mx-auto flex flex-col gap-2"
-            >
-              {imagePreviewUrl && (
-                <div className="relative inline-flex self-start">
-                  <img
-                    src={imagePreviewUrl}
-                    alt="Attached image preview"
-                    className="h-20 w-auto max-w-[160px] rounded-lg border border-border object-cover shadow-sm"
-                  />
-                  <button
-                    type="button"
-                    onClick={clearImage}
-                    className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow"
-                    aria-label="Remove image"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              )}
-              <div className="relative flex items-center">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  className="hidden"
-                  onChange={handleImageChange}
-                />
-                <Button
+            <div className="max-w-4xl mx-auto flex flex-col gap-2">
+              <div
+                role="tablist"
+                aria-label="Chat input mode"
+                className="mx-auto inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 p-1 text-xs shadow-sm backdrop-blur-sm"
+              >
+                <button
                   type="button"
-                  variant="ghost"
-                  size="icon"
-                  disabled={isStreaming || isDescribingImage}
-                  className="absolute left-2 h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
-                  aria-label="Attach image"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  {isDescribingImage ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Paperclip className="h-4 w-4" />
+                  role="tab"
+                  aria-selected={chatMode === "text"}
+                  onClick={() => setChatMode("text")}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-medium transition-colors",
+                    chatMode === "text"
+                      ? "bg-background text-foreground shadow-sm ring-1 ring-border/80"
+                      : "text-muted-foreground hover:text-foreground",
                   )}
-                </Button>
-                <Input
-                  id="chat-input"
-                  ref={chatInputRef}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Describe the issue. I will investigate and ask follow-ups only when needed..."
-                  className="pl-11 pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
-                  autoComplete="off"
-                  disabled={isStreaming || isDescribingImage}
-                />
-                <Button
-                  type="submit"
-                  size="icon"
-                  disabled={
-                    (!input.trim() && !imageFile) ||
-                    isStreaming ||
-                    isDescribingImage ||
-                    createConvo.isPending
-                  }
-                  className="absolute right-2 h-10 w-10 rounded-lg"
                 >
-                  <Send className="h-4 w-4" />
-                </Button>
+                  <Keyboard className="h-3.5 w-3.5" />
+                  Text chat
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={chatMode === "voice"}
+                  onClick={() => setChatMode("voice")}
+                  disabled={!speechSupported}
+                  title={
+                    speechSupported
+                      ? "Voice chat"
+                      : "Voice chat not supported in this browser"
+                  }
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                    chatMode === "voice"
+                      ? "bg-background text-foreground shadow-sm ring-1 ring-border/80"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <Mic className="h-3.5 w-3.5" />
+                  Voice chat
+                </button>
               </div>
-            </form>
+
+              {chatMode === "text" ? (
+                <form
+                  onSubmit={handleSubmit}
+                  className="flex flex-col gap-2"
+                >
+                  {imagePreviewUrl && (
+                    <div className="relative inline-flex self-start">
+                      <img
+                        src={imagePreviewUrl}
+                        alt="Attached image preview"
+                        className="h-20 w-auto max-w-[160px] rounded-lg border border-border object-cover shadow-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={clearImage}
+                        className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow"
+                        aria-label="Remove image"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )}
+                  <div className="relative flex items-center">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      className="hidden"
+                      onChange={handleImageChange}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      disabled={isStreaming || isDescribingImage}
+                      className="absolute left-2 h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
+                      aria-label="Attach image"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      {isDescribingImage ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Paperclip className="h-4 w-4" />
+                      )}
+                    </Button>
+                    <Input
+                      id="chat-input"
+                      ref={chatInputRef}
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      placeholder="Describe the issue. I will investigate and ask follow-ups only when needed..."
+                      className="pl-11 pr-12 py-6 text-base rounded-xl shadow-sm bg-background border-input"
+                      autoComplete="off"
+                      disabled={isStreaming || isDescribingImage}
+                    />
+                    <Button
+                      type="submit"
+                      size="icon"
+                      disabled={
+                        (!input.trim() && !imageFile) ||
+                        isStreaming ||
+                        isDescribingImage ||
+                        createConvo.isPending
+                      }
+                      className="absolute right-2 h-10 w-10 rounded-lg"
+                    >
+                      <Send className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </form>
+              ) : (
+                <VoiceChatPanel
+                  isListening={isListening}
+                  isSpeaking={isSpeaking}
+                  isStreaming={isStreaming}
+                  interimTranscript={interimTranscript}
+                  voiceError={voiceError}
+                  speechSupported={speechSupported}
+                  onToggleMic={toggleVoiceListening}
+                  onStopSpeaking={stopSpeaking}
+                />
+              )}
+            </div>
           )}
           <p className="max-w-4xl mx-auto mt-1.5 text-center text-[10px] leading-tight text-muted-foreground/90">
             Helia AI can make mistakes. Verify important information.

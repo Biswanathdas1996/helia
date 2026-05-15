@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -11,7 +12,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import metrics
+
+def _load_workspace_env() -> None:
+    """Load ``KEY=VALUE`` pairs from the nearest workspace ``.env`` file.
+
+    The api-server is normally launched by ``start-helia.bat`` which injects
+    environment variables from the workspace ``.env``. When the process is
+    started another way (or when ``.env`` is edited while uvicorn ``--reload``
+    is active) the parent process's environment can become stale. This loader
+    fills in any *missing* variables so endpoints like the ElevenLabs TTS
+    proxy keep working without requiring a full launcher restart.
+
+    Existing environment variables always win over file values.
+    """
+    here = Path(__file__).resolve()
+    for candidate_dir in [here.parent, *here.parents]:
+        env_path = candidate_dir / ".env"
+        if env_path.is_file():
+            try:
+                content = env_path.read_text(encoding="utf-8")
+            except OSError:
+                return
+            for raw_line in content.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if not key:
+                    continue
+                # Existing non-empty env values win; fill in missing or empty ones.
+                if os.environ.get(key):
+                    continue
+                os.environ[key] = value
+            return
+
+
+_load_workspace_env()
+
+from app import metrics  # noqa: E402  — must run after env loading
 from app.routes.auth import router as auth_router
 from app.routes.admin import router as admin_router
 from app.routes.chat import router as chat_router

@@ -11,14 +11,14 @@ from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import agent_memory, cache, chat_agent, llm, metrics, query_rewrite, rate_limit
 from app.audit import audit_log
 from app.auth import AuthedUser, require_auth
 from app.db import get_db, next_id
 from app.retrieval import retrieve
-from app.schemas import CreateConversationBody, SendMessageBody
+from app.schemas import CreateConversationBody, SendMessageBody, TtsBody
 from app.serialize import serialize_conversation, serialize_message, serialize_ticket
 from app.tenant import tenant_for
 from app import zoho
@@ -243,6 +243,146 @@ async def describe_chat_image(
         raise HTTPException(status_code=502, detail="Image description service returned empty content.")
 
     return {"description": description}
+
+
+# ---------------------------------------------------------------------------
+# Voice chat — ElevenLabs Text-to-Speech
+# ---------------------------------------------------------------------------
+
+_ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+# Default to "Monika Sogam" — an Indian English female voice from the
+# ElevenLabs voice library (warm, natural, professional). If your account
+# can't use library voices directly (free plan), add her to your VoiceLab and
+# override this with ELEVENLABS_VOICE_ID in .env.
+_ELEVENLABS_DEFAULT_VOICE_ID = "1qZOLVpd1TVic43MSkFY"
+# Multilingual v2 reproduces non-American accents (incl. Indian English) far
+# better than the turbo models, which is critical for natural pronunciation.
+_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
+_ELEVENLABS_LANGUAGE_CODE = "en"
+
+
+def _strip_text_for_tts(text: str) -> str:
+    """Remove markdown / citation markers so TTS reads natural prose."""
+    cleaned = text.strip()
+    if not cleaned:
+        return cleaned
+    # Strip fenced code blocks
+    cleaned = re.sub(r"```[\s\S]*?```", " ", cleaned)
+    # Strip inline code
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    # Bold/italic markers
+    cleaned = re.sub(r"\*\*(.+?)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"\*(.+?)\*", r"\1", cleaned)
+    cleaned = re.sub(r"__(.+?)__", r"\1", cleaned)
+    cleaned = re.sub(r"_(.+?)_", r"\1", cleaned)
+    # Citation refs like [1] or [12]
+    cleaned = re.sub(r"\[\d+\]", "", cleaned)
+    # Markdown links [text](url) -> text
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    # Bullet / heading markers at line start
+    cleaned = re.sub(r"^[ \t]*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^[ \t]*#+\s+", "", cleaned, flags=re.MULTILINE)
+    # Collapse whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _browser_tts_fallback(text: str, reason: str) -> JSONResponse:
+    """Return a JSON payload telling the browser to use its built-in
+    SpeechSynthesis API so the user still hears the response when ElevenLabs
+    is unavailable (e.g. missing key, free-plan voice restriction).
+    """
+    return JSONResponse(
+        status_code=200,
+        content={"useBrowserTts": True, "text": text, "reason": reason},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/chat/tts")
+async def chat_text_to_speech(
+    body: TtsBody,
+    user: AuthedUser = Depends(require_auth),
+) -> Response:
+    """Synthesize the given text into MP3 audio using ElevenLabs.
+
+    The endpoint keeps the ElevenLabs API key on the server. The browser
+    normally receives an ``audio/mpeg`` payload, but when ElevenLabs is not
+    configured or rejects the request (for example, a free-plan account
+    cannot use library voices), we return a small JSON object so the
+    browser can fall back to its built-in ``speechSynthesis`` API and the
+    user still hears the assistant's reply.
+    """
+    import os as _os
+
+    spoken = _strip_text_for_tts(body.text)
+    if not spoken:
+        raise HTTPException(status_code=400, detail="Nothing to speak")
+
+    api_key = (_os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+    if not api_key:
+        log.warning(
+            "ELEVENLABS_API_KEY is not set; falling back to browser SpeechSynthesis."
+        )
+        return _browser_tts_fallback(spoken, reason="missing_api_key")
+
+    voice_id = (body.voiceId or _os.environ.get("ELEVENLABS_VOICE_ID") or _ELEVENLABS_DEFAULT_VOICE_ID).strip()
+    model_id = (_os.environ.get("ELEVENLABS_MODEL_ID") or _ELEVENLABS_MODEL_ID).strip()
+    language_code = (_os.environ.get("ELEVENLABS_LANGUAGE_CODE") or _ELEVENLABS_LANGUAGE_CODE).strip()
+
+    url = _ELEVENLABS_TTS_URL.format(voice_id=voice_id)
+    # Voice settings tuned for a natural, polite Indian English woman:
+    #   stability  ~0.55  -> consistent tone without going monotone/robotic
+    #   similarity ~0.85  -> strongly preserve the chosen voice's accent
+    #   style      ~0.35  -> allow gentle, human expressiveness/warmth
+    #   speaker_boost      -> richer, more present timbre
+    payload: dict[str, object] = {
+        "text": spoken,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.55,
+            "similarity_boost": 0.85,
+            "style": 0.35,
+            "use_speaker_boost": True,
+        },
+    }
+    if language_code:
+        # Hint multilingual v2 to read English with the voice's native accent
+        # rather than auto-detecting; helps lock in Indian English pronunciation.
+        payload["language_code"] = language_code
+    headers = {
+        "xi-api-key": api_key,
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except Exception as exc:
+        log.warning("TTS request failed (%s); falling back to browser SpeechSynthesis.", exc)
+        return _browser_tts_fallback(spoken, reason="request_failed")
+
+    if resp.status_code != 200:
+        log.warning(
+            "ElevenLabs TTS failed: %s %s — falling back to browser SpeechSynthesis.",
+            resp.status_code,
+            resp.text[:500],
+        )
+        reason = "elevenlabs_error"
+        if resp.status_code == 402:
+            reason = "payment_required"
+        elif resp.status_code in (401, 403):
+            reason = "unauthorized"
+        return _browser_tts_fallback(spoken, reason=reason)
+
+    return Response(
+        content=resp.content,
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/chat/conversations")

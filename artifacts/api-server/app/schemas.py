@@ -36,6 +36,11 @@ class SendMessageBody(BaseModel):
     imageDataUrl: Optional[str] = Field(default=None, max_length=20_000_000)
 
 
+class TtsBody(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+    voiceId: Optional[str] = None
+
+
 class RateMessageBody(BaseModel):
     rating: Literal["up", "down"]
     comment: Optional[str] = None
