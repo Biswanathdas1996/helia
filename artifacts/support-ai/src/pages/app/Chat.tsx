@@ -9,7 +9,7 @@ import {
   useListTickets,
   useRateMessage,
   getListConversationsQueryKey,
-  getGetConversationQueryKey
+  getGetConversationQueryKey,
 } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
@@ -37,18 +37,31 @@ import {
   X,
   User,
   Brain,
-  Lightbulb
+  Lightbulb,
+  Search,
+  BookOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -66,6 +79,8 @@ const ORDERED_RE = /^\d+\.\s+/;
 const CITATION_RE = /\[(\d+)\]/g;
 const BOLD_RE = /\*\*(.+?)\*\*/g;
 const TICKET_ID_RE = /ticket\s*#\s*(\d+)/i;
+const ASSISTANT_BUBBLE_CLASS =
+  "relative isolate w-full overflow-hidden rounded-[1.625rem] rounded-tl-lg border border-slate-200/70 bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92)_55%,rgba(239,246,255,0.78))] px-5 py-4 text-sm text-foreground shadow-[0_1px_1px_rgba(15,23,42,0.03),0_18px_45px_rgba(15,23,42,0.08)] ring-1 ring-white/80 backdrop-blur-xl transition-shadow duration-300 before:absolute before:inset-x-6 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-white before:to-transparent before:content-[''] hover:shadow-[0_1px_1px_rgba(15,23,42,0.03),0_22px_55px_rgba(15,23,42,0.11)] dark:border-white/10 dark:bg-[linear-gradient(135deg,rgba(15,23,42,0.88),rgba(15,23,42,0.78)_58%,rgba(30,41,59,0.68))] dark:ring-white/10 dark:shadow-black/30 dark:before:via-white/30";
 
 function extractAssistantAnswer(content: string): string {
   const text = content.trim();
@@ -88,7 +103,10 @@ function extractAssistantAnswer(content: string): string {
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as { answer?: unknown };
-      if (typeof parsed.answer === "string" && parsed.answer.trim().length > 0) {
+      if (
+        typeof parsed.answer === "string" &&
+        parsed.answer.trim().length > 0
+      ) {
         return parsed.answer.trim();
       }
     } catch {
@@ -148,7 +166,9 @@ type MemoryGraphLayout = {
   width: number;
   height: number;
   positionedNodes: Array<MemoryGraphNode & { position: MemoryGraphPoint }>;
-  positionedEdges: Array<MemoryGraphEdge & { from: MemoryGraphPoint; to: MemoryGraphPoint }>;
+  positionedEdges: Array<
+    MemoryGraphEdge & { from: MemoryGraphPoint; to: MemoryGraphPoint }
+  >;
 };
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
@@ -214,7 +234,10 @@ function buildMemoryGraphLayout(
   const getP = (id: string) => pos.get(id);
 
   for (let iter = 0; iter < iterations; iter += 1) {
-    const temperature = Math.max(0.12, 2.2 * Math.pow(1 - iter / iterations, 1.65));
+    const temperature = Math.max(
+      0.12,
+      2.2 * Math.pow(1 - iter / iterations, 1.65),
+    );
 
     for (const p of pos.values()) {
       p.dx = 0;
@@ -325,7 +348,9 @@ function buildMemoryGraphLayout(
         to,
       };
     })
-    .filter(Boolean) as Array<MemoryGraphEdge & { from: MemoryGraphPoint; to: MemoryGraphPoint }>;
+    .filter(Boolean) as Array<
+    MemoryGraphEdge & { from: MemoryGraphPoint; to: MemoryGraphPoint }
+  >;
 
   return {
     width,
@@ -362,7 +387,10 @@ function memoryGraphEdgePath(
   return `M ${ax} ${ay} Q ${mx} ${my} ${bx} ${by}`;
 }
 
-function renderInlineCitations(text: string, keyPrefix: string): React.ReactNode[] {
+function renderInlineCitations(
+  text: string,
+  keyPrefix: string,
+): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
   let last = 0;
   let idx = 0;
@@ -394,7 +422,10 @@ function renderInlineCitations(text: string, keyPrefix: string): React.ReactNode
   return parts.length > 0 ? parts : [text];
 }
 
-function renderFormattedInline(text: string, keyPrefix: string): React.ReactNode[] {
+function renderFormattedInline(
+  text: string,
+  keyPrefix: string,
+): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
   let last = 0;
   let idx = 0;
@@ -406,11 +437,19 @@ function renderFormattedInline(text: string, keyPrefix: string): React.ReactNode
     const end = start + match[0].length;
 
     if (start > last) {
-      parts.push(...renderInlineCitations(text.slice(last, start), `${keyPrefix}-text-${idx}`));
+      parts.push(
+        ...renderInlineCitations(
+          text.slice(last, start),
+          `${keyPrefix}-text-${idx}`,
+        ),
+      );
     }
 
     parts.push(
-      <strong key={`${keyPrefix}-strong-${idx}`} className="font-semibold text-foreground">
+      <strong
+        key={`${keyPrefix}-strong-${idx}`}
+        className="font-semibold text-foreground"
+      >
         {renderInlineCitations(match[1], `${keyPrefix}-strong-content-${idx}`)}
       </strong>,
     );
@@ -423,10 +462,16 @@ function renderFormattedInline(text: string, keyPrefix: string): React.ReactNode
     parts.push(...renderInlineCitations(text.slice(last), `${keyPrefix}-tail`));
   }
 
-  return parts.length > 0 ? parts : renderInlineCitations(text, `${keyPrefix}-plain`);
+  return parts.length > 0
+    ? parts
+    : renderInlineCitations(text, `${keyPrefix}-plain`);
 }
 
-function renderParagraph(text: string, keyPrefix: string, className = "whitespace-pre-wrap"): React.ReactNode {
+function renderParagraph(
+  text: string,
+  keyPrefix: string,
+  className = "whitespace-pre-wrap",
+): React.ReactNode {
   return <p className={className}>{renderFormattedInline(text, keyPrefix)}</p>;
 }
 
@@ -449,7 +494,8 @@ function splitAssistantSegments(content: string): string[] {
       .split("\n")
       .map((l) => l.trim())
       .filter(Boolean);
-    const isHeadingOnly = Boolean(lines[0]?.match(/^\*\*(.+?)\*\*$/)) && lines.length === 1;
+    const isHeadingOnly =
+      Boolean(lines[0]?.match(/^\*\*(.+?)\*\*$/)) && lines.length === 1;
 
     if (isHeadingOnly) {
       if (current.length > 0) {
@@ -494,16 +540,28 @@ function renderAssistantContent(content: string): React.ReactNode {
               <h4 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary/80">
                 {headingMatch[1]}
               </h4>
-              {renderParagraph(body, `section-${blockIdx}`, "whitespace-pre-wrap text-[15px] leading-7 text-foreground/90")}
+              {renderParagraph(
+                body,
+                `section-${blockIdx}`,
+                "whitespace-pre-wrap text-[15px] leading-7 text-foreground/90",
+              )}
             </section>
           );
         }
 
         if (lines.length > 0 && lines.every((line) => BULLET_RE.test(line))) {
           return (
-            <ul key={`ul-${blockIdx}`} className="list-disc pl-5 space-y-1.5 marker:text-primary">
+            <ul
+              key={`ul-${blockIdx}`}
+              className="list-disc pl-5 space-y-1.5 marker:text-primary"
+            >
               {lines.map((line, liIdx) => (
-                <li key={`li-${blockIdx}-${liIdx}`}>{renderFormattedInline(line.replace(BULLET_RE, ""), `ul-${blockIdx}-${liIdx}`)}</li>
+                <li key={`li-${blockIdx}-${liIdx}`}>
+                  {renderFormattedInline(
+                    line.replace(BULLET_RE, ""),
+                    `ul-${blockIdx}-${liIdx}`,
+                  )}
+                </li>
               ))}
             </ul>
           );
@@ -511,25 +569,73 @@ function renderAssistantContent(content: string): React.ReactNode {
 
         if (lines.length > 0 && lines.every((line) => ORDERED_RE.test(line))) {
           return (
-            <ol key={`ol-${blockIdx}`} className="list-decimal pl-5 space-y-1.5 marker:text-primary">
+            <ol
+              key={`ol-${blockIdx}`}
+              className="list-decimal pl-5 space-y-1.5 marker:text-primary"
+            >
               {lines.map((line, liIdx) => (
-                <li key={`oli-${blockIdx}-${liIdx}`}>{renderFormattedInline(line.replace(ORDERED_RE, ""), `ol-${blockIdx}-${liIdx}`)}</li>
+                <li key={`oli-${blockIdx}-${liIdx}`}>
+                  {renderFormattedInline(
+                    line.replace(ORDERED_RE, ""),
+                    `ol-${blockIdx}-${liIdx}`,
+                  )}
+                </li>
               ))}
             </ol>
           );
         }
 
-        return <div key={`p-${blockIdx}`}>{renderParagraph(block, `p-${blockIdx}`)}</div>;
+        return (
+          <div key={`p-${blockIdx}`}>
+            {renderParagraph(block, `p-${blockIdx}`)}
+          </div>
+        );
       })}
     </div>
   );
+}
+
+function citationMetadataItems(
+  cite: ChatCitation,
+): Array<{ label: string; value: string }> {
+  return [
+    { label: "File", value: cite.metadata?.fileName ?? cite.documentName },
+    {
+      label: "Page",
+      value:
+        cite.metadata?.pageNumber != null
+          ? String(cite.metadata.pageNumber)
+          : "N/A",
+    },
+    {
+      label: "Position",
+      value:
+        cite.metadata?.chunkPosition != null
+          ? String(cite.metadata.chunkPosition)
+          : "N/A",
+    },
+    {
+      label: "Tokens",
+      value:
+        cite.metadata?.tokenCount != null
+          ? String(cite.metadata.tokenCount)
+          : "N/A",
+    },
+    { label: "Source", value: cite.metadata?.sourceType ?? "Knowledge base" },
+    { label: "Score", value: cite.score.toFixed(3) },
+  ];
 }
 
 type StreamingMessage = {
   id: number;
   conversationId: number;
   role: "user" | "assistant";
-  kind?: "answer" | "clarification_question" | "ticket_offer" | "ticket_created" | null;
+  kind?:
+    | "answer"
+    | "clarification_question"
+    | "ticket_offer"
+    | "ticket_created"
+    | null;
   ticketId?: number | null;
   content: string;
   citations: ChatCitation[];
@@ -596,21 +702,29 @@ const PROCESS_STEP_LABELS: Record<string, string> = {
   "Streaming failed": "Could not complete this response",
 };
 
-function messageKindOf(
-  msg: { kind?: string | null; canAnswer?: boolean | null },
-): "answer" | "clarification_question" | "ticket_offer" | "ticket_created" {
+function messageKindOf(msg: {
+  kind?: string | null;
+  canAnswer?: boolean | null;
+}): "answer" | "clarification_question" | "ticket_offer" | "ticket_created" {
   if (
-    msg.kind === "clarification_question"
-    || msg.kind === "ticket_offer"
-    || msg.kind === "ticket_created"
+    msg.kind === "clarification_question" ||
+    msg.kind === "ticket_offer" ||
+    msg.kind === "ticket_created"
   ) {
     return msg.kind;
   }
   return "answer";
 }
 
-function createdTicketIdOf(msg: { ticketId?: number | null; content: string }): number | null {
-  if (typeof msg.ticketId === "number" && Number.isInteger(msg.ticketId) && msg.ticketId > 0) {
+function createdTicketIdOf(msg: {
+  ticketId?: number | null;
+  content: string;
+}): number | null {
+  if (
+    typeof msg.ticketId === "number" &&
+    Number.isInteger(msg.ticketId) &&
+    msg.ticketId > 0
+  ) {
     return msg.ticketId;
   }
   const match = msg.content.match(TICKET_ID_RE);
@@ -623,10 +737,14 @@ function createdTicketIdOf(msg: { ticketId?: number | null; content: string }): 
 
 const TICKET_FEEDBACK_STORAGE_PREFIX = "helia-chat-star-rating";
 
-function readStoredStarRating(conversationId: number | undefined): number | null {
+function readStoredStarRating(
+  conversationId: number | undefined,
+): number | null {
   if (!conversationId) return null;
   try {
-    const raw = sessionStorage.getItem(`${TICKET_FEEDBACK_STORAGE_PREFIX}-${conversationId}`);
+    const raw = sessionStorage.getItem(
+      `${TICKET_FEEDBACK_STORAGE_PREFIX}-${conversationId}`,
+    );
     if (!raw) return null;
     const n = Number.parseInt(raw, 10);
     return n >= 1 && n <= 5 ? n : null;
@@ -694,7 +812,8 @@ async function* iterSseEvents(
         const dataLines: string[] = [];
         for (const line of block.split("\n")) {
           if (line.startsWith("event:")) event = line.slice(6).trim();
-          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          else if (line.startsWith("data:"))
+            dataLines.push(line.slice(5).trim());
         }
         if (dataLines.length > 0) {
           yield { event, data: dataLines.join("\n") };
@@ -710,14 +829,23 @@ export default function Chat() {
   const [location, setLocation] = useLocation();
   const params = useParams<{ id?: string }>();
   const currentId = params.id ? parseInt(params.id, 10) : undefined;
-  
-  const { data: conversations, isLoading: loadingConvos } = useListConversations();
-  const { data: tickets } = useListTickets();
-  const activeTickets = tickets?.filter(t => t.status !== "closed" && t.status !== "resolved") || [];
 
-  const { data: activeConvo, isLoading: loadingActive } = useGetConversation(currentId as number, { 
-    query: { enabled: !!currentId, queryKey: getGetConversationQueryKey(currentId as number) } 
-  });
+  const { data: conversations, isLoading: loadingConvos } =
+    useListConversations();
+  const { data: tickets } = useListTickets();
+  const activeTickets =
+    tickets?.filter((t) => t.status !== "closed" && t.status !== "resolved") ||
+    [];
+
+  const { data: activeConvo, isLoading: loadingActive } = useGetConversation(
+    currentId as number,
+    {
+      query: {
+        enabled: !!currentId,
+        queryKey: getGetConversationQueryKey(currentId as number),
+      },
+    },
+  );
 
   const createConvo = useCreateConversation();
   const rateMessage = useRateMessage();
@@ -727,7 +855,9 @@ export default function Chat() {
     mutation: {
       onSuccess: (_data, variables) => {
         const { id } = variables;
-        queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+        queryClient.invalidateQueries({
+          queryKey: getListConversationsQueryKey(),
+        });
         queryClient.removeQueries({ queryKey: getGetConversationQueryKey(id) });
         queryClient.removeQueries({ queryKey: ["chat-memory-graph", id] });
         if (currentId === id) {
@@ -737,7 +867,10 @@ export default function Chat() {
         toast({ title: "Conversation deleted" });
       },
       onError: () => {
-        toast({ title: "Failed to delete conversation", variant: "destructive" });
+        toast({
+          title: "Failed to delete conversation",
+          variant: "destructive",
+        });
       },
     },
   });
@@ -752,10 +885,15 @@ export default function Chat() {
   const [isConversationsOpen, setIsConversationsOpen] = useState(true);
   const [memoryGraphOpen, setMemoryGraphOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [streamingUserMessage, setStreamingUserMessage] = useState<StreamingMessage | null>(null);
-  const [streamingAssistantMessage, setStreamingAssistantMessage] = useState<StreamingAssistantMessage | null>(null);
+  const [streamingUserMessage, setStreamingUserMessage] =
+    useState<StreamingMessage | null>(null);
+  const [streamingAssistantMessage, setStreamingAssistantMessage] =
+    useState<StreamingAssistantMessage | null>(null);
   const [processSteps, setProcessSteps] = useState<ProcessStep[]>([]);
-  const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: number;
+    title: string;
+  } | null>(null);
   const [clearMemoryOpen, setClearMemoryOpen] = useState(false);
   const [isClearingMemory, setIsClearingMemory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -765,9 +903,12 @@ export default function Chat() {
     queryKey: ["chat-memory-graph", currentId],
     enabled: Boolean(currentId) && memoryGraphOpen,
     queryFn: async () => {
-      const res = await fetch(`/api/chat/conversations/${currentId}/memory-graph`, {
-        credentials: "include",
-      });
+      const res = await fetch(
+        `/api/chat/conversations/${currentId}/memory-graph`,
+        {
+          credentials: "include",
+        },
+      );
       if (!res.ok) {
         throw new Error("Failed to load memory graph");
       }
@@ -777,21 +918,27 @@ export default function Chat() {
   });
 
   const memoryLayout = useMemo(
-    () => buildMemoryGraphLayout(memoryGraph.data?.nodes, memoryGraph.data?.edges),
+    () =>
+      buildMemoryGraphLayout(memoryGraph.data?.nodes, memoryGraph.data?.edges),
     [memoryGraph.data?.nodes, memoryGraph.data?.edges],
   );
 
   const activeProcessStep = useMemo(() => {
     if (processSteps.length === 0) return null;
-    const started = [...processSteps].reverse().find((s) => s.status === "started");
+    const started = [...processSteps]
+      .reverse()
+      .find((s) => s.status === "started");
     if (started) return started;
-    const failed = [...processSteps].reverse().find((s) => s.status === "error");
+    const failed = [...processSteps]
+      .reverse()
+      .find((s) => s.status === "error");
     if (failed) return failed;
     return processSteps[processSteps.length - 1] ?? null;
   }, [processSteps]);
 
   const activeProcessPresentation = useMemo(
-    () => (activeProcessStep ? presentationForProcessStep(activeProcessStep) : null),
+    () =>
+      activeProcessStep ? presentationForProcessStep(activeProcessStep) : null,
     [activeProcessStep],
   );
 
@@ -800,15 +947,21 @@ export default function Chat() {
       return null;
     }
     const created = activeConvo.messages.filter(
-      (m) => m.role === "assistant" && messageKindOf(m as { kind?: string | null }) === "ticket_created",
+      (m) =>
+        m.role === "assistant" &&
+        messageKindOf(m as { kind?: string | null }) === "ticket_created",
     );
     return created[created.length - 1] ?? null;
   }, [activeConvo?.messages]);
 
   const chatEndedWithTicket = Boolean(ticketCreatedMessage);
 
-  const [conversationStarDraft, setConversationStarDraft] = useState<number | null>(null);
-  const [storedStarRating, setStoredStarRating] = useState<number | null>(() => readStoredStarRating(currentId));
+  const [conversationStarDraft, setConversationStarDraft] = useState<
+    number | null
+  >(null);
+  const [storedStarRating, setStoredStarRating] = useState<number | null>(() =>
+    readStoredStarRating(currentId),
+  );
 
   const [starRowHover, setStarRowHover] = useState<number | null>(null);
 
@@ -819,23 +972,23 @@ export default function Chat() {
   }, [currentId]);
 
   const conversationFeedbackDone =
-    storedStarRating != null
-    || (ticketCreatedMessage != null
-      && ticketCreatedMessage.rating !== undefined
-      && ticketCreatedMessage.rating !== null);
+    storedStarRating != null ||
+    (ticketCreatedMessage != null &&
+      ticketCreatedMessage.rating !== undefined &&
+      ticketCreatedMessage.rating !== null);
 
   const filledStarsReadonly =
-    storedStarRating
-    ?? (ticketCreatedMessage?.rating === "up"
+    storedStarRating ??
+    (ticketCreatedMessage?.rating === "up"
       ? 5
       : ticketCreatedMessage?.rating === "down"
         ? 2
         : null);
 
   const starHighlight =
-    starRowHover
-    ?? conversationStarDraft
-    ?? (conversationFeedbackDone ? filledStarsReadonly : null);
+    starRowHover ??
+    conversationStarDraft ??
+    (conversationFeedbackDone ? filledStarsReadonly : null);
 
   const submitConversationStarRating = async () => {
     if (!currentId || !ticketCreatedMessage || conversationStarDraft == null) {
@@ -850,12 +1003,17 @@ export default function Chat() {
         },
       });
       try {
-        sessionStorage.setItem(`${TICKET_FEEDBACK_STORAGE_PREFIX}-${currentId}`, String(conversationStarDraft));
+        sessionStorage.setItem(
+          `${TICKET_FEEDBACK_STORAGE_PREFIX}-${currentId}`,
+          String(conversationStarDraft),
+        );
       } catch {
         // ignore quota / privacy mode
       }
       setStoredStarRating(conversationStarDraft);
-      await queryClient.invalidateQueries({ queryKey: getGetConversationQueryKey(currentId) });
+      await queryClient.invalidateQueries({
+        queryKey: getGetConversationQueryKey(currentId),
+      });
       toast({ title: "Thanks for your feedback" });
     } catch {
       toast({ title: "Could not save feedback", variant: "destructive" });
@@ -866,7 +1024,12 @@ export default function Chat() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [activeConvo?.messages, isStreaming, streamingAssistantMessage?.content, processSteps]);
+  }, [
+    activeConvo?.messages,
+    isStreaming,
+    streamingAssistantMessage?.content,
+    processSteps,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -891,8 +1054,14 @@ export default function Chat() {
           {
             method: "POST",
             credentials: "include",
-            headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-            body: JSON.stringify({ content, imageDataUrl: imageDataUrl ?? null }),
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
+            body: JSON.stringify({
+              content,
+              imageDataUrl: imageDataUrl ?? null,
+            }),
             signal: controller.signal,
           },
         );
@@ -915,7 +1084,8 @@ export default function Chat() {
           if (evt.event === "user") {
             setStreamingUserMessage(payload as StreamingMessage);
           } else if (evt.event === "citations") {
-            assistantCitations = (payload as StreamingAssistantMessage["citations"]) ?? [];
+            assistantCitations =
+              (payload as StreamingAssistantMessage["citations"]) ?? [];
             setStreamingAssistantMessage((prev) => ({
               id: prev?.id ?? -1,
               conversationId: convoId,
@@ -941,11 +1111,16 @@ export default function Chat() {
               done: false,
             }));
           } else if (evt.event === "process") {
-            const step = payload as { name?: string; status?: ProcessStepStatus };
+            const step = payload as {
+              name?: string;
+              status?: ProcessStepStatus;
+            };
             const name = typeof step.name === "string" ? step.name.trim() : "";
             if (!name) continue;
             const status: ProcessStepStatus =
-              step.status === "completed" || step.status === "error" ? step.status : "started";
+              step.status === "completed" || step.status === "error"
+                ? step.status
+                : "started";
             setProcessSteps((prev) => {
               const existing = prev.findIndex((s) => s.name === name);
               if (existing === -1) {
@@ -978,11 +1153,18 @@ export default function Chat() {
           }
         }
 
-        await queryClient.invalidateQueries({ queryKey: getGetConversationQueryKey(convoId) });
-        await queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+        await queryClient.invalidateQueries({
+          queryKey: getGetConversationQueryKey(convoId),
+        });
+        await queryClient.invalidateQueries({
+          queryKey: getListConversationsQueryKey(),
+        });
       } catch (err) {
         if ((err as { name?: string })?.name === "AbortError") return;
-        setProcessSteps((prev) => [...prev, { name: "Streaming failed", status: "error" }]);
+        setProcessSteps((prev) => [
+          ...prev,
+          { name: "Streaming failed", status: "error" },
+        ]);
         toast({ title: "Failed to send message", variant: "destructive" });
       } finally {
         if (abortControllerRef.current === controller) {
@@ -1026,7 +1208,8 @@ export default function Chat() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!input.trim() && !imageFile) || isStreaming || chatEndedWithTicket) return;
+    if ((!input.trim() && !imageFile) || isStreaming || chatEndedWithTicket)
+      return;
 
     let content = input;
     setInput("");
@@ -1072,12 +1255,19 @@ export default function Chat() {
     let convoId = currentId;
     if (!convoId) {
       try {
-        const newConvo = await createConvo.mutateAsync({ data: { title: content.substring(0, 40) } });
+        const newConvo = await createConvo.mutateAsync({
+          data: { title: content.substring(0, 40) },
+        });
         convoId = newConvo.id;
         setLocation(`/app/conversations/${convoId}`);
-        queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+        queryClient.invalidateQueries({
+          queryKey: getListConversationsQueryKey(),
+        });
       } catch (err) {
-        toast({ title: "Failed to create conversation", variant: "destructive" });
+        toast({
+          title: "Failed to create conversation",
+          variant: "destructive",
+        });
         return;
       }
     }
@@ -1089,7 +1279,9 @@ export default function Chat() {
     if (!currentId) return;
     try {
       await rateMessage.mutateAsync({ id: messageId, data: { rating } });
-      queryClient.invalidateQueries({ queryKey: getGetConversationQueryKey(currentId) });
+      queryClient.invalidateQueries({
+        queryKey: getGetConversationQueryKey(currentId),
+      });
     } catch (err) {
       toast({ title: "Failed to rate message", variant: "destructive" });
     }
@@ -1115,19 +1307,28 @@ export default function Chat() {
 
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail ?? body?.error ?? "Failed to clear memory");
+        throw new Error(
+          body?.detail ?? body?.error ?? "Failed to clear memory",
+        );
       }
 
       queryClient.removeQueries({
         predicate: (query) => {
           const [firstKey] = query.queryKey;
-          return typeof firstKey === "string" && firstKey.startsWith("/api/chat/conversations");
+          return (
+            typeof firstKey === "string" &&
+            firstKey.startsWith("/api/chat/conversations")
+          );
         },
       });
       queryClient.removeQueries({
-        predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === "chat-memory-graph",
+        predicate: (query) =>
+          Array.isArray(query.queryKey) &&
+          query.queryKey[0] === "chat-memory-graph",
       });
-      await queryClient.invalidateQueries({ queryKey: getListConversationsQueryKey() });
+      await queryClient.invalidateQueries({
+        queryKey: getListConversationsQueryKey(),
+      });
       setLocation("/app");
       setClearMemoryOpen(false);
       toast({ title: "Agent memory cleared" });
@@ -1156,13 +1357,25 @@ export default function Chat() {
           <AlertDialogHeader>
             <AlertDialogTitle>Clear all saved memory?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes your saved conversations and the long-term memory stored for your account, including Mem0. This cannot be undone.
+              This removes your saved conversations and the long-term memory
+              stored for your account, including Mem0. This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isClearingMemory}>Cancel</AlertDialogCancel>
-            <Button type="button" variant="destructive" disabled={isClearingMemory} onClick={handleClearMemory}>
-              {isClearingMemory ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+            <AlertDialogCancel disabled={isClearingMemory}>
+              Cancel
+            </AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={isClearingMemory}
+              onClick={handleClearMemory}
+            >
+              {isClearingMemory ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="mr-2 h-4 w-4" />
+              )}
               Clear memory
             </Button>
           </AlertDialogFooter>
@@ -1180,21 +1393,27 @@ export default function Chat() {
             <AlertDialogDescription>
               {deleteTarget ? (
                 <>
-                  <span className="line-clamp-2 font-medium text-foreground">{deleteTarget.title}</span>{" "}
+                  <span className="line-clamp-2 font-medium text-foreground">
+                    {deleteTarget.title}
+                  </span>{" "}
                   will be removed permanently. This cannot be undone.
                 </>
               ) : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteConvo.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleteConvo.isPending}>
+              Cancel
+            </AlertDialogCancel>
             <Button
               type="button"
               variant="destructive"
               disabled={deleteConvo.isPending}
               onClick={handleConfirmDeleteConversation}
             >
-              {deleteConvo.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {deleteConvo.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
               Delete
             </Button>
           </AlertDialogFooter>
@@ -1214,7 +1433,7 @@ export default function Chat() {
                   "w-full justify-start gap-2 rounded-xl h-11 font-medium shadow-sm",
                   currentId
                     ? "border border-border/60 bg-background hover:bg-background/90"
-                    : null
+                    : null,
                 )}
                 variant={!currentId ? "default" : "outline"}
                 onClick={() => setLocation("/app")}
@@ -1253,7 +1472,9 @@ export default function Chat() {
                     onClick={() => setLocation(`/app/tickets/${ticket.id}`)}
                   >
                     <Ticket className="h-3 w-3 shrink-0 text-primary/70" />
-                    <span className="truncate font-medium">{ticket.subject}</span>
+                    <span className="truncate font-medium">
+                      {ticket.subject}
+                    </span>
                   </Button>
                 ))}
               </div>
@@ -1261,34 +1482,36 @@ export default function Chat() {
           )}
 
           <ScrollArea className="flex-1">
-            <div className="flex flex-col gap-3 px-3 py-4">
-              <div className="flex items-center gap-2.5 rounded-2xl border border-border/50 bg-muted/30 px-3 py-2.5 backdrop-blur-sm">
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-background/70 shadow-sm ring-1 ring-border/40">
-                  <History className="h-4 w-4 text-muted-foreground" />
+            <div className="flex flex-col gap-2 px-3 py-3">
+              <div className="flex items-center gap-2 rounded-xl border border-border/45 bg-background/55 px-2.5 py-2 backdrop-blur-sm">
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted/60 ring-1 ring-border/35">
+                  <History className="h-3.5 w-3.5 text-muted-foreground" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                     Recent
                   </span>
-                  <p className="truncate text-[10px] text-muted-foreground/75">Pick up where you left off</p>
+                  <p className="truncate text-[10px] text-muted-foreground/75">
+                    Pick up where you left off
+                  </p>
                 </div>
                 {!loadingConvos && conversations && conversations.length > 0 ? (
-                  <span className="shrink-0 rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-semibold tabular-nums text-foreground shadow-sm ring-1 ring-border/45">
+                  <span className="shrink-0 rounded-full bg-muted/70 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-foreground ring-1 ring-border/35">
                     {conversations.length}
                   </span>
                 ) : null}
               </div>
 
               {loadingConvos ? (
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-1.5">
                   {Array.from({ length: 5 }).map((_, i) => (
                     <div
                       key={i}
-                      className="rounded-2xl border border-border/40 bg-background/50 p-3 space-y-2 shadow-[0_2px_8px_-4px_rgba(15,23,42,0.12)] dark:shadow-none"
+                      className="rounded-xl border border-border/35 bg-background/45 p-2.5 space-y-2"
                     >
-                      <div className="flex gap-2.5">
-                        <Skeleton className="h-9 w-9 shrink-0 rounded-xl" />
-                        <div className="flex-1 space-y-1.5 pt-0.5">
+                      <div className="flex gap-2">
+                        <Skeleton className="h-7 w-7 shrink-0 rounded-lg" />
+                        <div className="flex-1 space-y-1.5">
                           <Skeleton className="h-3 w-[82%] rounded-md" />
                           <Skeleton className="h-2.5 w-full rounded-md" />
                         </div>
@@ -1301,18 +1524,23 @@ export default function Chat() {
                   <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-muted/70 to-muted/40 shadow-inner ring-1 ring-border/30">
                     <MessageSquare className="h-5 w-5 text-muted-foreground" />
                   </div>
-                  <p className="text-sm font-semibold text-foreground">No conversations yet</p>
+                  <p className="text-sm font-semibold text-foreground">
+                    No conversations yet
+                  </p>
                   <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed px-1">
                     Start a new thread — your history will show up here.
                   </p>
                 </div>
               ) : (
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-1.5">
                   {conversations?.map((convo) => {
                     const active = currentId === convo.id;
                     let timeLabel = "";
                     try {
-                      timeLabel = formatDistanceToNow(new Date(convo.updatedAt), { addSuffix: true });
+                      timeLabel = formatDistanceToNow(
+                        new Date(convo.updatedAt),
+                        { addSuffix: true },
+                      );
                     } catch {
                       timeLabel = "";
                     }
@@ -1320,63 +1548,71 @@ export default function Chat() {
                       <div
                         key={convo.id}
                         className={cn(
-                          "group relative w-full min-w-0 max-w-full rounded-2xl border font-normal whitespace-normal shadow-sm",
+                          "group relative w-full min-w-0 max-w-full rounded-xl border font-normal whitespace-normal",
                           "transition-[transform,background-color,border-color,box-shadow] duration-200 ease-out",
                           active
-                            ? "border-border/80 bg-background shadow-[0_4px_20px_-10px_rgba(15,23,42,0.18)] ring-1 ring-primary/15 dark:shadow-none"
-                            : "border-border/35 bg-muted/20 hover:bg-muted/40 hover:border-border/55 hover:shadow-[0_2px_12px_-6px_rgba(15,23,42,0.14)] dark:hover:shadow-none"
+                            ? "border-primary/25 bg-background shadow-[0_6px_20px_-16px_rgba(15,23,42,0.35)] ring-1 ring-primary/10 dark:shadow-none"
+                            : "border-transparent bg-transparent hover:border-border/45 hover:bg-background/55",
                         )}
                       >
                         <button
                           type="button"
                           className={cn(
-                            "flex min-w-0 w-full gap-2.5 overflow-hidden rounded-2xl px-3 py-2.5 pr-10 text-left outline-none transition-colors duration-200",
+                            "flex min-w-0 w-full gap-2 overflow-hidden rounded-xl px-2.5 py-2 pr-9 text-left outline-none transition-colors duration-200",
                             "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                            active ? "" : "hover:bg-transparent"
+                            active ? "" : "hover:bg-transparent",
                           )}
-                          onClick={() => setLocation(`/app/conversations/${convo.id}`)}
+                          onClick={() =>
+                            setLocation(`/app/conversations/${convo.id}`)
+                          }
                         >
                           <div
                             className={cn(
-                              "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-sm ring-1 transition-colors duration-200",
+                              "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ring-1 transition-colors duration-200",
                               active
-                                ? "bg-primary/15 text-primary ring-primary/20"
-                                : "bg-muted/80 text-muted-foreground ring-border/35 group-hover:bg-muted group-hover:text-foreground/80"
+                                ? "bg-primary/12 text-primary ring-primary/20"
+                                : "bg-muted/50 text-muted-foreground ring-border/30 group-hover:bg-muted/80 group-hover:text-foreground/80",
                             )}
                           >
-                            <MessageSquare className="h-4 w-4" />
+                            <MessageSquare className="h-3.5 w-3.5" />
                           </div>
-                          <div className="min-w-0 flex-1 flex flex-col gap-1 pt-0.5">
+                          <div className="min-w-0 flex-1 flex flex-col gap-0.5">
                             <div className="flex min-w-0 w-full items-start justify-between gap-2">
                               <span
                                 className={cn(
-                                  "min-w-0 flex-1 text-[13px] font-semibold leading-snug tracking-tight line-clamp-1",
-                                  active ? "text-foreground" : "text-foreground/92"
+                                  "min-w-0 flex-1 text-[13px] font-semibold leading-tight tracking-tight line-clamp-1",
+                                  active
+                                    ? "text-foreground"
+                                    : "text-foreground/92",
                                 )}
                               >
                                 {convo.title || "New conversation"}
                               </span>
                               <div className="flex shrink-0 items-center gap-0.5">
                                 {timeLabel ? (
-                                  <span className="text-[10px] font-medium tabular-nums text-muted-foreground max-w-[5.75rem] truncate pt-px">
+                                  <span className="max-w-[4.75rem] truncate pt-px text-[10px] font-medium tabular-nums text-muted-foreground">
                                     {timeLabel}
                                   </span>
                                 ) : null}
                                 <ChevronRight
                                   className={cn(
-                                    "h-4 w-4 shrink-0 text-muted-foreground/40 transition-opacity duration-200",
-                                    active ? "opacity-70" : "opacity-0 group-hover:opacity-60"
+                                    "h-3.5 w-3.5 shrink-0 text-muted-foreground/40 transition-opacity duration-200",
+                                    active
+                                      ? "opacity-70"
+                                      : "opacity-0 group-hover:opacity-60",
                                   )}
                                   aria-hidden
                                 />
                               </div>
                             </div>
                             {convo.lastMessagePreview ? (
-                              <p className="text-[11px] leading-snug text-muted-foreground line-clamp-2">
+                              <p className="text-[11px] leading-tight text-muted-foreground line-clamp-1">
                                 {convo.lastMessagePreview}
                               </p>
                             ) : (
-                              <p className="text-[11px] text-muted-foreground/65 italic leading-snug">No preview yet</p>
+                              <p className="text-[11px] text-muted-foreground/65 italic leading-tight">
+                                No preview yet
+                              </p>
                             )}
                           </div>
                         </button>
@@ -1386,10 +1622,10 @@ export default function Chat() {
                           size="icon"
                           disabled={deleteConvo.isPending}
                           className={cn(
-                            "absolute right-2 top-2 z-[1] h-8 w-8 shrink-0 rounded-lg",
+                            "absolute right-1.5 top-1.5 z-[1] h-7 w-7 shrink-0 rounded-lg",
                             "text-muted-foreground/55 hover:bg-destructive/10 hover:text-destructive",
                             "opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto",
-                            "focus-visible:opacity-100 focus-visible:pointer-events-auto"
+                            "focus-visible:opacity-100 focus-visible:pointer-events-auto",
                           )}
                           aria-label={`Delete conversation: ${convo.title || "New conversation"}`}
                           title="Delete conversation"
@@ -1398,11 +1634,13 @@ export default function Chat() {
                             e.stopPropagation();
                             setDeleteTarget({
                               id: convo.id,
-                              title: (convo.title || "New conversation").trim() || "New conversation",
+                              title:
+                                (convo.title || "New conversation").trim() ||
+                                "New conversation",
                             });
                           }}
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 className="h-3.5 w-3.5" />
                         </Button>
                       </div>
                     );
@@ -1424,10 +1662,22 @@ export default function Chat() {
                 size="icon"
                 className="h-8 w-8 shrink-0"
                 onClick={() => setIsConversationsOpen((open) => !open)}
-                aria-label={isConversationsOpen ? "Collapse conversation list" : "Expand conversation list"}
-                title={isConversationsOpen ? "Collapse conversation list" : "Expand conversation list"}
+                aria-label={
+                  isConversationsOpen
+                    ? "Collapse conversation list"
+                    : "Expand conversation list"
+                }
+                title={
+                  isConversationsOpen
+                    ? "Collapse conversation list"
+                    : "Expand conversation list"
+                }
               >
-                {isConversationsOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+                {isConversationsOpen ? (
+                  <PanelLeftClose className="h-4 w-4" />
+                ) : (
+                  <PanelLeftOpen className="h-4 w-4" />
+                )}
               </Button>
               <div className="min-w-0">
                 <h2 className="text-sm font-semibold truncate">
@@ -1456,20 +1706,24 @@ export default function Chat() {
             <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mb-6">
               <Bot className="h-8 w-8 text-primary" />
             </div>
-            <h2 className="text-2xl font-semibold mb-2">Tell me what is going wrong</h2>
+            <h2 className="text-2xl font-semibold mb-2">
+              Tell me what is going wrong
+            </h2>
             <p className="text-muted-foreground max-w-md">
-              I will investigate the issue, ask only the follow-up questions that matter, and answer from verified documentation when I have enough evidence.
+              I will investigate the issue, ask only the follow-up questions
+              that matter, and answer from verified documentation when I have
+              enough evidence.
             </p>
             <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl w-full pointer-events-auto">
               {[
                 "How do I reset my password?",
                 "What are the API rate limits?",
                 "How to integrate with Salesforce?",
-                "Where is the billing dashboard?"
-              ].map(q => (
-                <Button 
-                  key={q} 
-                  variant="outline" 
+                "Where is the billing dashboard?",
+              ].map((q) => (
+                <Button
+                  key={q}
+                  variant="outline"
                   className="h-auto py-3 justify-start text-left text-sm font-normal text-muted-foreground hover:text-foreground"
                   onClick={() => {
                     setInput(q);
@@ -1483,7 +1737,7 @@ export default function Chat() {
           </div>
         )}
 
-        <div 
+        <div
           ref={scrollRef}
           className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6"
         >
@@ -1492,144 +1746,285 @@ export default function Chat() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           )}
-          
+
           {activeConvo?.messages.map((msg, i) => (
-            <div 
-              key={msg.id} 
-              className={`flex gap-4 max-w-4xl mx-auto ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+            <div
+              key={msg.id}
+              className={`flex gap-4 max-w-4xl mx-auto ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
-              {msg.role === 'assistant' && (
+              {msg.role === "assistant" && (
                 <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
                   <Bot className="h-4 w-4 text-primary" />
                 </div>
               )}
-              
-              <div className={`flex flex-col gap-2 max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                {msg.role === 'assistant' && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) !== 'answer' && (
-                  <Badge variant="secondary" className="text-[11px] font-medium">
-                    {messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'clarification_question'
-                      ? 'Investigating'
-                      : messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'ticket_created'
-                        ? 'Ticket created'
-                        : 'Escalation option'}
-                  </Badge>
-                )}
-                {msg.role === 'assistant' ? (
-                  <div className="w-full space-y-3">
-                    {splitAssistantSegments(msg.content).map((segment, segmentIdx, segments) => {
-                      const rewritten = (msg as { rewrittenQuery?: string | null }).rewrittenQuery?.trim() ?? "";
-                      const citeList = msg.citations ?? [];
-                      const showSourcesAccordion =
-                        segmentIdx === segments.length - 1
-                        && (rewritten.length > 0 || citeList.length > 0);
-                      const sourcesTriggerLabel =
-                        rewritten.length > 0 && citeList.length > 0
-                          ? "Sources & search query"
-                          : rewritten.length > 0
-                            ? "Search query"
-                            : "Sources";
 
-                      return (
-                        <motion.div
-                          key={`${msg.id}-segment-${segmentIdx}`}
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          transition={{ duration: 0.22, delay: segmentIdx * 0.08, ease: "easeOut" }}
-                          className="w-full px-5 py-4 rounded-[24px] rounded-tl-md text-sm bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] text-foreground ring-1 ring-white/70 backdrop-blur-sm"
-                        >
-                          {renderAssistantContent(segment)}
-                          {showSourcesAccordion && (
-                            <Accordion type="single" collapsible className="mt-4 w-full border-t border-border/50 pt-0">
-                              <AccordionItem value={`sources-${msg.id}`} className="border-0">
-                                <AccordionTrigger className="py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70 hover:no-underline [&[data-state=open]]:pb-1">
-                                  {sourcesTriggerLabel}
-                                </AccordionTrigger>
-                                <AccordionContent className="space-y-3 pb-0 pt-0">
-                                  {rewritten.length > 0 && (
-                                    <p className="text-[11px] leading-snug text-muted-foreground/80 pr-6">
-                                      <span className="font-medium uppercase tracking-wider text-[10px] text-muted-foreground/70 mr-1.5">Searching for:</span>
-                                      <span className="italic">{rewritten}</span>
-                                    </p>
-                                  )}
-                                  {citeList.length > 0 && (
-                                    <div className="flex flex-wrap gap-1">
-                                      {citeList.map((cite, idx) => (
-                                        <Popover key={idx}>
-                                          <PopoverTrigger asChild>
-                                            <Badge variant="outline" className="cursor-pointer hover:bg-accent text-xs py-0 h-6 font-normal text-muted-foreground border-border/70 bg-background/80">
-                                              [{idx + 1}] {cite.documentName}
-                                            </Badge>
-                                          </PopoverTrigger>
-                                          <PopoverContent
-                                            className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden p-0"
-                                            align="start"
-                                            side="bottom"
-                                            collisionPadding={16}
-                                          >
-                                            <div className="shrink-0 border-b border-border px-4 py-3">
-                                              <div className="font-medium flex items-start gap-2">
-                                                <FileText className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                                                <span className="min-w-0 break-words">{cite.documentName}</span>
-                                              </div>
-                                            </div>
-                                            <div className="max-h-[min(70vh,26rem)] overflow-y-auto px-4 py-3">
-                                              <p className="whitespace-pre-wrap break-words text-muted-foreground leading-relaxed">
-                                                {`"...${cite.snippet}..."`}
-                                              </p>
-                                              <div className="mt-3">
-                                                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
-                                                  Chunk Metadata
-                                                </p>
-                                                <pre className="max-w-full whitespace-pre-wrap break-words text-[11px] leading-relaxed bg-muted/60 border border-border rounded p-2 overflow-x-auto">
-{JSON.stringify(
-  {
-    fileName: cite.metadata?.fileName ?? cite.documentName,
-    pageNumber: cite.metadata?.pageNumber ?? null,
-    keyPhrases: cite.metadata?.keyPhrases ?? [],
-    chunkPosition: cite.metadata?.chunkPosition ?? null,
-    tokenCount: cite.metadata?.tokenCount ?? null,
-    sourceType: cite.metadata?.sourceType ?? null,
-    score: Number(cite.score.toFixed(3)),
-  },
-  null,
-  2,
-)}
-                                                </pre>
-                                              </div>
-                                            </div>
-                                          </PopoverContent>
-                                        </Popover>
-                                      ))}
+              <div
+                className={`flex flex-col gap-2 max-w-[80%] ${msg.role === "user" ? "items-end" : "items-start"}`}
+              >
+                {msg.role === "assistant" &&
+                  messageKindOf(
+                    msg as { kind?: string | null; canAnswer?: boolean | null },
+                  ) !== "answer" && (
+                    <Badge
+                      variant="secondary"
+                      className="text-[11px] font-medium"
+                    >
+                      {messageKindOf(
+                        msg as {
+                          kind?: string | null;
+                          canAnswer?: boolean | null;
+                        },
+                      ) === "clarification_question"
+                        ? "Investigating"
+                        : messageKindOf(
+                              msg as {
+                                kind?: string | null;
+                                canAnswer?: boolean | null;
+                              },
+                            ) === "ticket_created"
+                          ? "Ticket created"
+                          : "Escalation option"}
+                    </Badge>
+                  )}
+                {msg.role === "assistant" ? (
+                  <div className="w-full space-y-3">
+                    {splitAssistantSegments(msg.content).map(
+                      (segment, segmentIdx, segments) => {
+                        const rewritten =
+                          (
+                            msg as { rewrittenQuery?: string | null }
+                          ).rewrittenQuery?.trim() ?? "";
+                        const citeList = msg.citations ?? [];
+                        const showSourcesAccordion =
+                          segmentIdx === segments.length - 1 &&
+                          (rewritten.length > 0 || citeList.length > 0);
+
+                        return (
+                          <motion.div
+                            key={`${msg.id}-segment-${segmentIdx}`}
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{
+                              duration: 0.22,
+                              delay: segmentIdx * 0.08,
+                              ease: "easeOut",
+                            }}
+                            className={ASSISTANT_BUBBLE_CLASS}
+                          >
+                            {renderAssistantContent(segment)}
+                            {showSourcesAccordion && (
+                              <Accordion
+                                type="single"
+                                collapsible
+                                className="mt-3 w-full border-t border-border/40 pt-1"
+                              >
+                                <AccordionItem
+                                  value={`sources-${msg.id}`}
+                                  className="border-0"
+                                >
+                                  <AccordionTrigger className="group py-2 text-left text-muted-foreground hover:no-underline hover:text-foreground [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:text-muted-foreground/60">
+                                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors group-hover:text-primary/80">
+                                        {rewritten.length > 0 ? (
+                                          <Search className="h-3.5 w-3.5" />
+                                        ) : (
+                                          <BookOpen className="h-3.5 w-3.5" />
+                                        )}
+                                      </span>
+                                      <span className="min-w-0 flex-1 truncate">
+                                        <span className="text-xs font-medium">
+                                          {rewritten.length > 0 &&
+                                          citeList.length > 0
+                                            ? "Sources & query"
+                                            : rewritten.length > 0
+                                              ? "Search query"
+                                              : "Sources"}
+                                        </span>
+                                        <span className="mx-1.5 text-muted-foreground/45">
+                                          -
+                                        </span>
+                                        <span className="text-[11px] font-normal text-muted-foreground/75">
+                                          {rewritten.length > 0 &&
+                                          citeList.length > 0
+                                            ? `${citeList.length} source${citeList.length === 1 ? "" : "s"} matched`
+                                            : rewritten.length > 0
+                                              ? "View rewritten query"
+                                              : `${citeList.length} source${citeList.length === 1 ? "" : "s"}`}
+                                        </span>
+                                      </span>
                                     </div>
-                                  )}
-                                </AccordionContent>
-                              </AccordionItem>
-                            </Accordion>
-                          )}
-                        </motion.div>
-                      );
-                    })}
+                                  </AccordionTrigger>
+                                  <AccordionContent className="pb-1 pt-1">
+                                    <div className="space-y-3">
+                                      {rewritten.length > 0 && (
+                                        <div className="rounded-xl border border-border/60 bg-background/45 px-3 py-2.5">
+                                          <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-primary/75">
+                                            Searching for
+                                          </p>
+                                          <p className="text-xs leading-relaxed text-foreground/85">
+                                            {rewritten}
+                                          </p>
+                                        </div>
+                                      )}
+                                      {citeList.length > 0 && (
+                                        <div className="rounded-2xl border border-slate-200/70 bg-white/45 p-2.5 shadow-inner shadow-slate-950/[0.03] ring-1 ring-white/70 dark:border-white/10 dark:bg-white/[0.04] dark:ring-white/10">
+                                          <div className="mb-2 flex items-center justify-between gap-3 px-1">
+                                            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground/75">
+                                              Referenced sources
+                                            </p>
+                                            <span className="h-px flex-1 bg-gradient-to-r from-border/70 to-transparent" />
+                                          </div>
+                                          <div className="flex flex-wrap gap-2">
+                                            {citeList.map((cite, idx) => (
+                                              <Dialog key={idx}>
+                                                <DialogTrigger asChild>
+                                                  <button
+                                                    type="button"
+                                                    className="group inline-flex h-9 max-w-full cursor-pointer items-center gap-2 whitespace-nowrap rounded-full border border-slate-200/80 bg-background/85 py-1 pl-1.5 pr-3 text-xs font-medium text-foreground/80 shadow-sm shadow-slate-950/[0.03] ring-1 ring-white/60 transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-primary/[0.08] hover:text-foreground hover:shadow-md hover:shadow-primary/10 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 dark:border-white/10 dark:bg-white/[0.06] dark:ring-white/10 dark:hover:bg-primary/15"
+                                                  >
+                                                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary ring-1 ring-primary/15 transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
+                                                      {idx + 1}
+                                                    </span>
+                                                    <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-colors group-hover:text-primary" />
+                                                    <span className="min-w-0 max-w-[13rem] truncate">
+                                                      {cite.documentName}
+                                                    </span>
+                                                    <span className="hidden rounded-full bg-muted/70 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground/80 sm:inline-flex">
+                                                      {cite.score.toFixed(2)}
+                                                    </span>
+                                                  </button>
+                                                </DialogTrigger>
+                                                <DialogContent className="max-h-[90vh] w-[min(46rem,calc(100vw-2rem))] overflow-hidden rounded-3xl border-border/70 bg-background p-0 shadow-2xl shadow-slate-950/10 sm:max-w-[46rem] dark:shadow-black/35">
+                                                  <DialogHeader className="relative overflow-hidden border-b border-border/60 bg-gradient-to-br from-muted/50 via-background/90 to-primary/[0.06] px-5 pb-4 pt-5 pr-12 text-left sm:px-6 sm:pt-6">
+                                                    <div
+                                                      className="pointer-events-none absolute right-0 top-0 h-28 w-28 translate-x-8 -translate-y-10 rounded-full bg-primary/10 blur-2xl"
+                                                      aria-hidden
+                                                    />
+                                                    <div className="relative flex items-start gap-3">
+                                                      <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
+                                                        <FileText className="h-4 w-4" />
+                                                      </span>
+                                                      <div className="min-w-0 flex-1">
+                                                        <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                                                          Source excerpt
+                                                        </p>
+                                                        <DialogTitle className="mt-1 break-words text-base font-semibold leading-snug text-foreground">
+                                                          {cite.documentName}
+                                                        </DialogTitle>
+                                                        <DialogDescription className="mt-1 text-xs text-muted-foreground">
+                                                          Relevance score{" "}
+                                                          {cite.score.toFixed(
+                                                            2,
+                                                          )}
+                                                        </DialogDescription>
+                                                      </div>
+                                                    </div>
+                                                  </DialogHeader>
+                                                  <div className="max-h-[calc(90vh-8.5rem)] overflow-y-auto scroll-smooth bg-gradient-to-b from-background/40 to-muted/20 p-4 sm:p-6">
+                                                    <article className="rounded-2xl border border-border/60 bg-background/85 p-4 shadow-inner shadow-slate-950/[0.03] ring-1 ring-white/50 sm:p-5 dark:ring-white/5">
+                                                      <div className="mb-3 flex items-center justify-between gap-3">
+                                                        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary/80">
+                                                          Matched passage
+                                                        </p>
+                                                        <span className="h-px flex-1 bg-gradient-to-r from-border/80 to-transparent" />
+                                                      </div>
+                                                      <p className="whitespace-pre-wrap break-words text-sm leading-7 text-foreground/90 sm:text-[15px]">
+                                                        {cite.snippet}
+                                                      </p>
+                                                    </article>
+
+                                                    <div className="mt-5 space-y-3">
+                                                      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                                                        Metadata
+                                                      </p>
+                                                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                                        {citationMetadataItems(
+                                                          cite,
+                                                        ).map((item) => (
+                                                          <div
+                                                            key={item.label}
+                                                            className="min-w-0 rounded-xl border border-border/55 bg-background/70 px-3 py-2"
+                                                          >
+                                                            <p className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+                                                              {item.label}
+                                                            </p>
+                                                            <p
+                                                              className="mt-0.5 truncate text-xs font-medium text-foreground"
+                                                              title={item.value}
+                                                            >
+                                                              {item.value}
+                                                            </p>
+                                                          </div>
+                                                        ))}
+                                                      </div>
+                                                      {cite.metadata
+                                                        ?.keyPhrases &&
+                                                      cite.metadata.keyPhrases
+                                                        .length > 0 ? (
+                                                        <div className="rounded-xl border border-border/55 bg-background/70 px-3 py-2.5">
+                                                          <p className="mb-2 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+                                                            Key phrases
+                                                          </p>
+                                                          <div className="flex flex-wrap gap-1.5">
+                                                            {cite.metadata.keyPhrases
+                                                              .slice(0, 8)
+                                                              .map((phrase) => (
+                                                                <Badge
+                                                                  key={phrase}
+                                                                  variant="secondary"
+                                                                  className="rounded-full px-2 py-0 text-[10px] font-medium"
+                                                                >
+                                                                  {phrase}
+                                                                </Badge>
+                                                              ))}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                    </div>
+                                                  </div>
+                                                </DialogContent>
+                                              </Dialog>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </AccordionContent>
+                                </AccordionItem>
+                              </Accordion>
+                            )}
+                          </motion.div>
+                        );
+                      },
+                    )}
                   </div>
                 ) : (
                   <div className="flex flex-col items-end gap-2">
                     {(msg as { imageDataUrl?: string | null }).imageDataUrl && (
                       <img
-                        src={(msg as { imageDataUrl?: string | null }).imageDataUrl as string}
+                        src={
+                          (msg as { imageDataUrl?: string | null })
+                            .imageDataUrl as string
+                        }
                         alt="Attached image"
                         className="max-h-56 max-w-xs rounded-2xl border border-border object-cover shadow-sm"
                       />
                     )}
                     {stripImageContext(msg.content) && (
                       <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
-                        <div className="whitespace-pre-wrap leading-relaxed">{stripImageContext(msg.content)}</div>
+                        <div className="whitespace-pre-wrap leading-relaxed">
+                          {stripImageContext(msg.content)}
+                        </div>
                       </div>
                     )}
                   </div>
                 )}
 
-                {msg.role === "assistant"
-                  && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === "answer"
-                  && !(msg as { finalVerdict?: boolean }).finalVerdict && (
+                {msg.role === "assistant" &&
+                  messageKindOf(
+                    msg as { kind?: string | null; canAnswer?: boolean | null },
+                  ) === "answer" &&
+                  !(msg as { finalVerdict?: boolean }).finalVerdict && (
                     <div className="flex w-full justify-end gap-2 mt-1">
                       <div className="flex items-center gap-1">
                         <Button
@@ -1652,18 +2047,24 @@ export default function Chat() {
                     </div>
                   )}
 
-                {msg.role === "assistant"
-                  && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === "answer"
-                  && (msg as { finalVerdict?: boolean }).finalVerdict && (
+                {msg.role === "assistant" &&
+                  messageKindOf(
+                    msg as { kind?: string | null; canAnswer?: boolean | null },
+                  ) === "answer" &&
+                  (msg as { finalVerdict?: boolean }).finalVerdict && (
                     <motion.div
                       initial={{ opacity: 0, y: 8 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ duration: 0.22, ease: "easeOut" }}
                       className="mt-3 w-full max-w-md rounded-2xl border border-slate-200/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] px-4 py-4 shadow-[0_8px_24px_rgba(15,23,42,0.06)] ring-1 ring-white/60 backdrop-blur-sm"
                     >
-                      <p className="text-sm font-semibold text-foreground tracking-tight">Did this resolve your issue?</p>
+                      <p className="text-sm font-semibold text-foreground tracking-tight">
+                        Did this resolve your issue?
+                      </p>
                       <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                        Quick feedback helps us improve these answers. If you are still stuck, we can open a ticket for a human teammate.
+                        Quick feedback helps us improve these answers. If you
+                        are still stuck, we can open a ticket for a human
+                        teammate.
                       </p>
                       <div className="flex flex-wrap items-center gap-2 mt-3">
                         <Button
@@ -1679,7 +2080,9 @@ export default function Chat() {
                         </Button>
                         <Button
                           type="button"
-                          variant={msg.rating === "down" ? "destructive" : "outline"}
+                          variant={
+                            msg.rating === "down" ? "destructive" : "outline"
+                          }
                           size="sm"
                           className="gap-1.5 rounded-full h-9"
                           disabled={rateMessage.isPending}
@@ -1706,18 +2109,30 @@ export default function Chat() {
                       </div>
                     </motion.div>
                   )}
-                
-                {msg.role === 'assistant' && messageKindOf(msg as { kind?: string | null; canAnswer?: boolean | null }) === 'ticket_created' && createdTicketIdOf(msg as { ticketId?: number | null; content: string }) && (
-                  <div className="mt-2 bg-secondary/50 border border-secondary p-3 rounded-lg flex items-center justify-between w-full">
-                    <span className="text-sm text-foreground/80">Your escalation ticket is open and ready for follow-up.</span>
-                    <Button
-                      size="sm"
-                      onClick={() => setLocation(`/app/tickets/${createdTicketIdOf(msg as { ticketId?: number | null; content: string })}`)}
-                    >
-                      Open Ticket
-                    </Button>
-                  </div>
-                )}
+
+                {msg.role === "assistant" &&
+                  messageKindOf(
+                    msg as { kind?: string | null; canAnswer?: boolean | null },
+                  ) === "ticket_created" &&
+                  createdTicketIdOf(
+                    msg as { ticketId?: number | null; content: string },
+                  ) && (
+                    <div className="mt-2 bg-secondary/50 border border-secondary p-3 rounded-lg flex items-center justify-between w-full">
+                      <span className="text-sm text-foreground/80">
+                        Your escalation ticket is open and ready for follow-up.
+                      </span>
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          setLocation(
+                            `/app/tickets/${createdTicketIdOf(msg as { ticketId?: number | null; content: string })}`,
+                          )
+                        }
+                      >
+                        Open Ticket
+                      </Button>
+                    </div>
+                  )}
               </div>
             </div>
           ))}
@@ -1734,49 +2149,60 @@ export default function Chat() {
                 )}
                 {stripImageContext(streamingUserMessage.content) && (
                   <div className="px-4 py-3 rounded-2xl rounded-tr-sm text-sm bg-primary text-primary-foreground shadow-sm">
-                    <div className="whitespace-pre-wrap leading-relaxed">{stripImageContext(streamingUserMessage.content)}</div>
+                    <div className="whitespace-pre-wrap leading-relaxed">
+                      {stripImageContext(streamingUserMessage.content)}
+                    </div>
                   </div>
                 )}
               </div>
             </div>
           )}
 
-          {streamingAssistantMessage && streamingAssistantMessage.content.length > 0 && (
-            <div className="flex gap-4 max-w-4xl mx-auto justify-start">
-              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
-                <Bot className="h-4 w-4 text-primary" />
-              </div>
-              <div className="flex flex-col gap-2 max-w-[80%] items-start">
-                <div className="w-full space-y-3">
-                  {splitAssistantSegments(streamingAssistantMessage.content).map((segment, segmentIdx, segments) => (
-                    <motion.div
-                      key={`stream-segment-${segmentIdx}`}
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.22, delay: segmentIdx * 0.08, ease: "easeOut" }}
-                      className="w-full px-5 py-4 rounded-[24px] rounded-tl-md text-sm bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.07)] text-foreground ring-1 ring-white/70 backdrop-blur-sm"
-                    >
-                      {renderAssistantContent(segment)}
-                      {segmentIdx === segments.length - 1 && <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse rounded-sm" />}
-                    </motion.div>
-                  ))}
+          {streamingAssistantMessage &&
+            streamingAssistantMessage.content.length > 0 && (
+              <div className="flex gap-4 max-w-4xl mx-auto justify-start">
+                <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
+                  <Bot className="h-4 w-4 text-primary" />
                 </div>
-                {streamingAssistantMessage.citations.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {streamingAssistantMessage.citations.map((cite, idx) => (
-                      <Badge
-                        key={`stream-cite-${idx}`}
-                        variant="outline"
-                        className="text-xs py-0 h-6 font-normal text-muted-foreground border-border/70 bg-background/80"
+                <div className="flex flex-col gap-2 max-w-[80%] items-start">
+                  <div className="w-full space-y-3">
+                    {splitAssistantSegments(
+                      streamingAssistantMessage.content,
+                    ).map((segment, segmentIdx, segments) => (
+                      <motion.div
+                        key={`stream-segment-${segmentIdx}`}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{
+                          duration: 0.22,
+                          delay: segmentIdx * 0.08,
+                          ease: "easeOut",
+                        }}
+                        className={ASSISTANT_BUBBLE_CLASS}
                       >
-                        [{idx + 1}] {cite.documentName}
-                      </Badge>
+                        {renderAssistantContent(segment)}
+                        {segmentIdx === segments.length - 1 && (
+                          <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse rounded-sm" />
+                        )}
+                      </motion.div>
                     ))}
                   </div>
-                )}
+                  {streamingAssistantMessage.citations.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {streamingAssistantMessage.citations.map((cite, idx) => (
+                        <Badge
+                          key={`stream-cite-${idx}`}
+                          variant="outline"
+                          className="text-xs py-0 h-6 font-normal text-muted-foreground border-border/70 bg-background/80"
+                        >
+                          [{idx + 1}] {cite.documentName}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
           {isStreaming && activeProcessStep && activeProcessPresentation && (
             <div className="max-w-4xl mx-auto">
@@ -1791,15 +2217,25 @@ export default function Chat() {
                 <div
                   className={cn(
                     "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted/50 shadow-inner ring-1 ring-border/40",
-                    activeProcessStep.status === "error" && "bg-destructive/10 ring-destructive/20",
+                    activeProcessStep.status === "error" &&
+                      "bg-destructive/10 ring-destructive/20",
                   )}
                 >
                   {activeProcessStep.status === "completed" ? (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-500" aria-hidden />
+                    <CheckCircle2
+                      className="h-4 w-4 text-emerald-600 dark:text-emerald-500"
+                      aria-hidden
+                    />
                   ) : activeProcessStep.status === "error" ? (
-                    <AlertTriangle className="h-4 w-4 text-destructive" aria-hidden />
+                    <AlertTriangle
+                      className="h-4 w-4 text-destructive"
+                      aria-hidden
+                    />
                   ) : (
-                    <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden />
+                    <Loader2
+                      className="h-4 w-4 animate-spin text-primary"
+                      aria-hidden
+                    />
                   )}
                 </div>
                 <div className="min-w-0 flex-1 overflow-hidden">
@@ -1825,18 +2261,29 @@ export default function Chat() {
             </div>
           )}
 
-          {isStreaming && (!streamingAssistantMessage || streamingAssistantMessage.content.length === 0) && (
-            <div className="flex gap-4 max-w-4xl mx-auto justify-start">
-              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
-                <Bot className="h-4 w-4 text-primary" />
+          {isStreaming &&
+            (!streamingAssistantMessage ||
+              streamingAssistantMessage.content.length === 0) && (
+              <div className="flex gap-4 max-w-4xl mx-auto justify-start">
+                <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
+                  <Bot className="h-4 w-4 text-primary" />
+                </div>
+                <div className="p-4 rounded-2xl bg-muted/50 border border-border rounded-tl-sm flex items-center gap-1">
+                  <div
+                    className="w-2 h-2 rounded-full bg-muted-foreground/40 animate-bounce"
+                    style={{ animationDelay: "0ms" }}
+                  />
+                  <div
+                    className="w-2 h-2 rounded-full bg-muted-foreground/40 animate-bounce"
+                    style={{ animationDelay: "150ms" }}
+                  />
+                  <div
+                    className="w-2 h-2 rounded-full bg-muted-foreground/40 animate-bounce"
+                    style={{ animationDelay: "300ms" }}
+                  />
+                </div>
               </div>
-              <div className="p-4 rounded-2xl bg-muted/50 border border-border rounded-tl-sm flex items-center gap-1">
-                <div className="w-2 h-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: "0ms" }} />
-                <div className="w-2 h-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: "150ms" }} />
-                <div className="w-2 h-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: "300ms" }} />
-              </div>
-            </div>
-          )}
+            )}
         </div>
 
         <div className="border-t border-border/80 bg-background/95 px-3 py-2 md:px-8 md:py-2.5 backdrop-blur-sm">
@@ -1853,7 +2300,9 @@ export default function Chat() {
                     <Ticket className="h-3.5 w-3.5" aria-hidden />
                   </div>
                   <div className="min-w-0 space-y-0.5">
-                    <p className="text-xs font-semibold leading-tight text-foreground">Rate this conversation</p>
+                    <p className="text-xs font-semibold leading-tight text-foreground">
+                      Rate this conversation
+                    </p>
                     <p className="text-[11px] leading-snug text-muted-foreground">
                       Ticket created — chat closed. How did we do?
                     </p>
@@ -1870,11 +2319,14 @@ export default function Chat() {
                       <button
                         key={n}
                         type="button"
-                        disabled={conversationFeedbackDone || rateMessage.isPending}
+                        disabled={
+                          conversationFeedbackDone || rateMessage.isPending
+                        }
                         className={cn(
                           "rounded-md p-0.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
                           !conversationFeedbackDone && "hover:bg-background/80",
-                          (conversationFeedbackDone || rateMessage.isPending) && "cursor-default opacity-70",
+                          (conversationFeedbackDone || rateMessage.isPending) &&
+                            "cursor-default opacity-70",
                         )}
                         title={`${n} of 5`}
                         onClick={() => {
@@ -1904,12 +2356,16 @@ export default function Chat() {
                       type="button"
                       size="sm"
                       className="h-7 gap-1 rounded-md px-2.5 text-[11px] font-medium"
-                      disabled={conversationStarDraft == null || rateMessage.isPending}
+                      disabled={
+                        conversationStarDraft == null || rateMessage.isPending
+                      }
                       onClick={() => {
                         void submitConversationStarRating();
                       }}
                     >
-                      {rateMessage.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                      {rateMessage.isPending ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : null}
                       Submit
                     </Button>
                   ) : (
@@ -1925,10 +2381,15 @@ export default function Chat() {
           {chatEndedWithTicket ? (
             <div className="max-w-4xl mx-auto flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-border/60 bg-muted/15 py-1.5 px-2 text-[11px] text-muted-foreground">
               <Ticket className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
-              <span>Replies are disabled — continue in your support ticket.</span>
+              <span>
+                Replies are disabled — continue in your support ticket.
+              </span>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex flex-col gap-2">
+            <form
+              onSubmit={handleSubmit}
+              className="max-w-4xl mx-auto flex flex-col gap-2"
+            >
               {imagePreviewUrl && (
                 <div className="relative inline-flex self-start">
                   <img
@@ -1963,7 +2424,11 @@ export default function Chat() {
                   aria-label="Attach image"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  {isDescribingImage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+                  {isDescribingImage ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Paperclip className="h-4 w-4" />
+                  )}
                 </Button>
                 <Input
                   id="chat-input"
@@ -1979,10 +2444,10 @@ export default function Chat() {
                   type="submit"
                   size="icon"
                   disabled={
-                    (!input.trim() && !imageFile)
-                    || isStreaming
-                    || isDescribingImage
-                    || createConvo.isPending
+                    (!input.trim() && !imageFile) ||
+                    isStreaming ||
+                    isDescribingImage ||
+                    createConvo.isPending
                   }
                   className="absolute right-2 h-10 w-10 rounded-lg"
                 >
@@ -2001,14 +2466,19 @@ export default function Chat() {
             <DialogHeader className="px-6 pt-6 pb-3">
               <DialogTitle>Memory Graph</DialogTitle>
               <DialogDescription>
-                Connected view of what Helia remembers for this user and conversation context.
+                Connected view of what Helia remembers for this user and
+                conversation context.
               </DialogDescription>
             </DialogHeader>
 
             <div className="px-6 pb-6">
               <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <Badge variant="outline">Nodes: {memoryGraph.data?.nodes.length ?? 0}</Badge>
-                <Badge variant="outline">Edges: {memoryGraph.data?.edges.length ?? 0}</Badge>
+                <Badge variant="outline">
+                  Nodes: {memoryGraph.data?.nodes.length ?? 0}
+                </Badge>
+                <Badge variant="outline">
+                  Edges: {memoryGraph.data?.edges.length ?? 0}
+                </Badge>
                 {memoryGraph.data?.query && (
                   <Badge variant="outline" className="max-w-full truncate">
                     Query seed: {memoryGraph.data.query}
@@ -2018,7 +2488,8 @@ export default function Chat() {
 
               {memoryGraph.isLoading ? (
                 <div className="h-[430px] rounded-xl border border-border/60 bg-muted/15 backdrop-blur-sm flex items-center justify-center gap-2 text-sm text-muted-foreground shadow-inner">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Loading memory graph...
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading memory
+                  graph...
                 </div>
               ) : memoryGraph.isError ? (
                 <div className="h-[430px] rounded-xl border border-destructive/25 bg-destructive/[0.06] flex items-center justify-center text-sm text-destructive">
@@ -2027,7 +2498,9 @@ export default function Chat() {
               ) : (memoryGraph.data?.nodes.length ?? 0) <= 1 ? (
                 <div className="h-[430px] rounded-xl border border-dashed border-border/70 bg-muted/10 backdrop-blur-sm flex flex-col items-center justify-center gap-1 px-6 text-center text-sm text-muted-foreground">
                   <span>No user memory found yet.</span>
-                  <span className="text-xs text-muted-foreground/80">Continue chatting to build memory.</span>
+                  <span className="text-xs text-muted-foreground/80">
+                    Continue chatting to build memory.
+                  </span>
                 </div>
               ) : (
                 <div className="overflow-x-auto rounded-xl border border-border/50 bg-muted/20 shadow-[inset_0_1px_0_0_hsl(var(--border)_/_0.35)] dark:bg-muted/10 dark:shadow-[inset_0_1px_0_0_hsl(var(--border)_/_0.25)]">
@@ -2055,7 +2528,11 @@ export default function Chat() {
                           orient="auto"
                           viewBox="0 0 10 11"
                         >
-                          <path d="M0 0 L10 5.5 L0 11 Z" fill="hsl(var(--muted-foreground))" fillOpacity={0.55} />
+                          <path
+                            d="M0 0 L10 5.5 L0 11 Z"
+                            fill="hsl(var(--muted-foreground))"
+                            fillOpacity={0.55}
+                          />
                         </marker>
                         <marker
                           id="memory-graph-arrow-primary"
@@ -2067,9 +2544,19 @@ export default function Chat() {
                           orient="auto"
                           viewBox="0 0 10 11"
                         >
-                          <path d="M0 0 L10 5.5 L0 11 Z" fill="hsl(var(--primary))" fillOpacity={0.75} />
+                          <path
+                            d="M0 0 L10 5.5 L0 11 Z"
+                            fill="hsl(var(--primary))"
+                            fillOpacity={0.75}
+                          />
                         </marker>
-                        <filter id="memory-graph-edge-glow" x="-40%" y="-40%" width="180%" height="180%">
+                        <filter
+                          id="memory-graph-edge-glow"
+                          x="-40%"
+                          y="-40%"
+                          width="180%"
+                          height="180%"
+                        >
                           <feGaussianBlur stdDeviation="1.2" result="b" />
                           <feMerge>
                             <feMergeNode in="b" />
@@ -2084,13 +2571,21 @@ export default function Chat() {
                             key={`${edge.source}-${edge.target}-${idx}`}
                             d={memoryGraphEdgePath(edge.from, edge.to, idx)}
                             fill="none"
-                            stroke={isPrimary ? "hsl(var(--primary))" : "hsl(var(--muted-foreground))"}
+                            stroke={
+                              isPrimary
+                                ? "hsl(var(--primary))"
+                                : "hsl(var(--muted-foreground))"
+                            }
                             strokeOpacity={isPrimary ? 0.42 : 0.22}
                             strokeWidth={isPrimary ? 2.1 : 1.35}
                             strokeLinecap="round"
                             strokeLinejoin="round"
                             markerEnd={`url(#${isPrimary ? "memory-graph-arrow-primary" : "memory-graph-arrow"})`}
-                            filter={isPrimary ? "url(#memory-graph-edge-glow)" : undefined}
+                            filter={
+                              isPrimary
+                                ? "url(#memory-graph-edge-glow)"
+                                : undefined
+                            }
                             vectorEffect="non-scaling-stroke"
                           />
                         );
@@ -2098,12 +2593,20 @@ export default function Chat() {
                     </svg>
 
                     {memoryLayout.positionedNodes.map((node) => {
-                      const Icon = node.type === "user" ? User : node.type === "memory" ? Brain : Lightbulb;
+                      const Icon =
+                        node.type === "user"
+                          ? User
+                          : node.type === "memory"
+                            ? Brain
+                            : Lightbulb;
                       return (
                         <div
                           key={node.id}
                           className="absolute z-[1]"
-                          style={{ left: `${node.position.x}px`, top: `${node.position.y}px` }}
+                          style={{
+                            left: `${node.position.x}px`,
+                            top: `${node.position.y}px`,
+                          }}
                           title={node.label}
                         >
                           <div className="relative">
@@ -2118,11 +2621,19 @@ export default function Chat() {
                                   "border-secondary/70 bg-gradient-to-br from-secondary to-secondary/80 text-secondary-foreground",
                               )}
                             >
-                              <Icon className="h-[18px] w-[18px] shrink-0 opacity-95" strokeWidth={2} aria-hidden />
+                              <Icon
+                                className="h-[18px] w-[18px] shrink-0 opacity-95"
+                                strokeWidth={2}
+                                aria-hidden
+                              />
                             </div>
                             <div className="absolute left-1/2 top-[calc(50%+30px)] w-[min(168px,calc(100vw-6rem))] -translate-x-1/2 text-center">
                               <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                                {node.type === "user" ? "You" : node.type === "memory" ? "Memory" : "Concept"}
+                                {node.type === "user"
+                                  ? "You"
+                                  : node.type === "memory"
+                                    ? "Memory"
+                                    : "Concept"}
                               </div>
                               <div className="mt-0.5 line-clamp-2 text-[11px] font-medium leading-snug text-foreground drop-shadow-sm">
                                 {node.label}

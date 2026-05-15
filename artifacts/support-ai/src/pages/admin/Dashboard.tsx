@@ -1516,25 +1516,47 @@ function SafetyBar({
   tone: "emerald" | "cyan" | "amber";
   invert?: boolean;
 }) {
-  const toneCls: Record<string, string> = {
-    emerald: "from-emerald-500 to-teal-500",
-    cyan: "from-cyan-500 to-sky-500",
-    amber: "from-amber-500 to-orange-500",
+  const toneCls: Record<string, { bar: string; barGlow: string; glow: string; chip: string }> = {
+    emerald: {
+      bar: "from-emerald-400 via-teal-400 to-cyan-400",
+      barGlow: "shadow-[0_0_18px_rgba(45,212,191,0.38)]",
+      glow: "from-emerald-400/18 via-teal-400/8 to-transparent",
+      chip: "bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 dark:text-emerald-300",
+    },
+    cyan: {
+      bar: "from-cyan-400 via-sky-400 to-blue-400",
+      barGlow: "shadow-[0_0_18px_rgba(56,189,248,0.38)]",
+      glow: "from-cyan-400/18 via-sky-400/8 to-transparent",
+      chip: "bg-cyan-500/10 text-cyan-700 ring-cyan-500/20 dark:text-cyan-300",
+    },
+    amber: {
+      bar: "from-amber-400 via-orange-400 to-rose-400",
+      barGlow: "shadow-[0_0_18px_rgba(251,146,60,0.38)]",
+      glow: "from-amber-400/18 via-orange-400/8 to-transparent",
+      chip: "bg-amber-500/10 text-amber-700 ring-amber-500/20 dark:text-amber-300",
+    },
   };
   const ariaLabel = description ? `${label}: ${value}%. ${description}` : `${label}: ${value}%`;
+  const activeTone = invert && value >= 25 ? toneCls.amber : toneCls[tone];
+
   return (
-    <div className="space-y-1.5 rounded-xl border border-border/50 bg-gradient-to-br from-muted/25 to-transparent px-3.5 py-2.5 dark:from-muted/12">
-      <div className="flex items-baseline justify-between gap-2">
-        <p className="text-xs font-medium text-foreground">{label}</p>
-        <p className="text-sm font-semibold tabular-nums text-foreground">{value}%</p>
-      </div>
-      {description ? (
-        <p className="line-clamp-1 text-[11px] leading-snug text-muted-foreground" title={description}>
-          {description}
+    <div className="group relative overflow-hidden rounded-2xl border border-border/55 bg-background/75 px-4 py-3.5 shadow-sm shadow-black/[0.03] ring-1 ring-white/60 backdrop-blur-md transition-all duration-300 hover:-translate-y-0.5 hover:border-border/80 hover:shadow-lg hover:shadow-black/[0.06] dark:bg-card/45 dark:ring-white/5 dark:shadow-black/25">
+      <div className={cn("pointer-events-none absolute -right-12 -top-14 h-28 w-28 rounded-full bg-gradient-to-br blur-2xl transition-opacity duration-300 group-hover:opacity-100", activeTone.glow)} />
+      <div className="relative flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-xs font-semibold tracking-tight text-foreground">{label}</p>
+          {description ? (
+            <p className="mt-1 line-clamp-1 text-[11px] leading-snug text-muted-foreground" title={description}>
+              {description}
+            </p>
+          ) : null}
+        </div>
+        <p className={cn("shrink-0 rounded-full px-2.5 py-1 text-sm font-bold tabular-nums leading-none ring-1", activeTone.chip)}>
+          {value}%
         </p>
-      ) : null}
+      </div>
       <div
-        className="h-1.5 w-full overflow-hidden rounded-full bg-muted/80 dark:bg-muted/40"
+        className="relative mt-3 h-2 w-full overflow-hidden rounded-full bg-muted/70 ring-1 ring-border/40 dark:bg-muted/30"
         role="progressbar"
         aria-valuenow={value}
         aria-valuemin={0}
@@ -1544,12 +1566,13 @@ function SafetyBar({
         <div
           className={cn(
             "h-full rounded-full bg-gradient-to-r transition-all duration-500",
-            invert && value >= 25 ? "from-amber-500 to-orange-500" : toneCls[tone],
+            activeTone.bar,
+            activeTone.barGlow,
           )}
           style={{ width: `${Math.min(100, Math.max(0, value))}%` }}
         />
       </div>
-      <p className="text-[10px] text-muted-foreground">{detail}</p>
+      <p className="relative mt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">{detail}</p>
     </div>
   );
 }
